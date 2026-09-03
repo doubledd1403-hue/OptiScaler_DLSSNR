@@ -1,0 +1,302 @@
+name: Chimera Phase 1B - Patch and Build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch-build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Chimera branch
+        uses: actions/checkout@v6
+        with:
+          ref: chimera-amd-nr
+          submodules: 'true'
+          fetch-depth: 0
+
+      - name: Apply AMD D3D12 Proton backend stub
+        shell: pwsh
+        run: |
+          @'
+          from pathlib import Path
+          import sys
+
+          TARGET = Path("OptiScaler/shaders/dlssnr/DlssNr_Dx12.cpp")
+
+          def replace_once(text, old, new, label):
+              count = text.count(old)
+              if count != 1:
+                  raise RuntimeError(f"{label}: expected exactly 1 match, found {count}")
+              return text.replace(old, new, 1)
+
+          path = TARGET
+          text = path.read_text(encoding="utf-8")
+
+          # Idempotence: do nothing if already patched.
+          if "CHIMERA AMD D3D12 STUB: SUCCESS" in text:
+              print("Chimera Phase 1B is already applied.")
+              sys.exit(0)
+
+          text = replace_once(
+              text,
+              '#include <cstring>\n#include "precompile/DlssNr_Shader.h"',
+              '#include <cstring>\n#include <dxgi1_4.h>\n#include "precompile/DlssNr_Shader.h"',
+              "DXGI include",
+          )
+
+          text = replace_once(
+              text,
+              """namespace
+          {
+          // NGX result codes, by name.
+          """,
+              """namespace
+          {
+
+          bool ChimeraIsAmdD3D12Device(ID3D12Device* device)
+          {
+              if (device == nullptr)
+                  return false;
+
+              IDXGIFactory4* factory = nullptr;
+
+              if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) || factory == nullptr)
+                  return false;
+
+              IDXGIAdapter1* adapter = nullptr;
+              const HRESULT enumResult =
+                  factory->EnumAdapterByLuid(device->GetAdapterLuid(), IID_PPV_ARGS(&adapter));
+
+              factory->Release();
+
+              if (FAILED(enumResult) || adapter == nullptr)
+                  return false;
+
+              DXGI_ADAPTER_DESC1 desc {};
+              const HRESULT descResult = adapter->GetDesc1(&desc);
+              adapter->Release();
+
+              return SUCCEEDED(descResult) && desc.VendorId == 0x1002u;
+          }
+
+          // NGX result codes, by name.
+          """,
+              "AMD helper",
+          )
+
+          text = replace_once(
+              text,
+              """    NVSDK_NGX_Parameter* capabilityParams = nullptr;
+              void* feature = nullptr;
+
+              // The model cannot read and write one resource, so the frame is staged through these.
+          """,
+              """    NVSDK_NGX_Parameter* capabilityParams = nullptr;
+              void* feature = nullptr;
+
+              // Chimera Phase 1B: AMD D3D12/Proton proof path.
+              bool chimeraAmdDx12 = false;
+              bool chimeraDx12SelectedReported = false;
+              bool chimeraDx12EncodeReported = false;
+
+              // The model cannot read and write one resource, so the frame is staged through these.
+          """,
+              "Chimera state",
+          )
+
+          text = replace_once(
+              text,
+              """    const D3D12_RESOURCE_DESC desc = target->GetDesc();
+              const auto width = (unsigned int) desc.Width;
+              const auto height = desc.Height;
+
+              // Depth and motion vectors are the upscaler's inputs and so are at render resolution, while colour
+          """,
+              """    const D3D12_RESOURCE_DESC desc = target->GetDesc();
+              const auto width = (unsigned int) desc.Width;
+              const auto height = desc.Height;
+
+              g_nr.chimeraAmdDx12 = ChimeraIsAmdD3D12Device(device);
+
+              if (g_nr.chimeraAmdDx12 && !g_nr.chimeraDx12SelectedReported)
+              {
+                  g_nr.chimeraDx12SelectedReported = true;
+                  LOG_INFO("CHIMERA AMD D3D12 STUB: selected AMD backend (DX12/Proton path)");
+              }
+
+              // Depth and motion vectors are the upscaler's inputs and so are at render resolution, while colour
+          """,
+              "AMD detection",
+          )
+
+          text = replace_once(
+              text,
+              """    if (cfg.DlssNrProxyProbe.value_or_default())
+                  ProbeProxyDispatch(cmdList);
+
+              if (!EnsureForwarder() || !EnsureCapabilityParams(device))
+              {
+                  g_nr.failed = true;
+                  LOG_ERROR("DLSS-NR unavailable: {}", g_nr.reason);
+                  device->Release();
+                  return;
+              }
+          """,
+              """    if (!g_nr.chimeraAmdDx12 && cfg.DlssNrProxyProbe.value_or_default())
+                  ProbeProxyDispatch(cmdList);
+
+              if (!g_nr.chimeraAmdDx12 && (!EnsureForwarder() || !EnsureCapabilityParams(device)))
+              {
+                  g_nr.failed = true;
+                  LOG_ERROR("DLSS-NR unavailable: {}", g_nr.reason);
+                  device->Release();
+                  return;
+              }
+          """,
+              "NVIDIA bypass",
+          )
+
+          text = replace_once(
+              text,
+              """    if (g_nr.feature == nullptr && g_nr.output != nullptr && g_nr.colorCopy != nullptr &&
+                  g_nr.hdrCopy != nullptr)
+              {
+          """,
+              """    if (!g_nr.chimeraAmdDx12 && g_nr.feature == nullptr && g_nr.output != nullptr &&
+                  g_nr.colorCopy != nullptr && g_nr.hdrCopy != nullptr)
+              {
+          """,
+              "Feature creation guard",
+          )
+
+          text = replace_once(
+              text,
+              """    if (g_nr.feature == nullptr)
+              {
+                  device->Release();
+                  return;
+              }
+
+              // The upscaler has just written this, so it is a UAV. The model needs it readable.
+          """,
+              """    if (!g_nr.chimeraAmdDx12 && g_nr.feature == nullptr)
+              {
+                  device->Release();
+                  return;
+              }
+
+              if (g_nr.chimeraAmdDx12)
+              {
+                  g_nr.width = width;
+                  g_nr.height = height;
+                  g_nr.workWidth = workWidth;
+                  g_nr.workHeight = workHeight;
+              }
+
+              // The upscaler has just written this, so it is a UAV. The model needs it readable.
+          """,
+              "Feature null guard",
+          )
+
+          text = replace_once(
+              text,
+              """    Barrier(cmdList, g_nr.hdrCopy, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                      D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+              // Below full resolution the model is shown a filtered shrink of the proxy; the edit it returns is
+          """,
+              """    Barrier(cmdList, g_nr.hdrCopy, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                      D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+              // Chimera Phase 1B stops after OptiScaler's existing Encode compute pass.
+              // This proves that a normal DX12 game under Proton/vkd3d reaches our AMD
+              // compute insertion point without loading NVIDIA's Neural Rendering runtime.
+              if (g_nr.chimeraAmdDx12)
+              {
+                  if (!g_nr.chimeraDx12EncodeReported)
+                  {
+                      g_nr.chimeraDx12EncodeReported = true;
+                      LOG_INFO("CHIMERA AMD D3D12 STUB: SUCCESS - compute encode reached ({}x{}, guides {}x{})",
+                               width, height, guideWidth, guideHeight);
+                  }
+
+                  Barrier(cmdList, g_nr.colorCopy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                          D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                  Barrier(cmdList, g_nr.hdrCopy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                          D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+                  device->Release();
+                  return;
+              }
+
+              // Below full resolution the model is shown a filtered shrink of the proxy; the edit it returns is
+          """,
+              "AMD proof point",
+          )
+
+          text = replace_once(
+              text,
+              "bool IsRunning() { return g_nr.feature != nullptr && !g_nr.failed; }",
+              "bool IsRunning() { return (g_nr.feature != nullptr || g_nr.chimeraAmdDx12) && !g_nr.failed; }",
+              "IsRunning",
+          )
+
+          text = replace_once(
+              text,
+              """    g_capture.release();
+              g_gpuTime.reset();
+          """,
+              """    g_nr.chimeraAmdDx12 = false;
+              g_nr.chimeraDx12SelectedReported = false;
+              g_nr.chimeraDx12EncodeReported = false;
+
+              g_capture.release();
+              g_gpuTime.reset();
+          """,
+              "Shutdown reset",
+          )
+
+          path.write_text(text, encoding="utf-8")
+          print("CHIMERA PHASE 1B PATCH APPLIED")
+          '@ | Set-Content -Encoding UTF8 chimera_apply_phase1b.py
+
+          python chimera_apply_phase1b.py
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build OptiScaler
+        shell: pwsh
+        run: |
+          msbuild /m /p:Configuration=Release . /verbosity:minimal
+
+      - name: Commit successful Phase 1B patch
+        shell: pwsh
+        run: |
+          git config user.name "Chimera Build Bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add OptiScaler/shaders/dlssnr/DlssNr_Dx12.cpp
+          if (-not (git diff --cached --quiet)) {
+            git commit -m "chimera: add AMD D3D12 Proton backend stub"
+            git push origin HEAD:chimera-amd-nr
+          } else {
+            Write-Host "No source changes to commit."
+          }
+
+      - name: Package Chimera Phase 1B
+        shell: pwsh
+        run: |
+          7z a -r "${{ github.workspace }}\Chimera_Phase1B_ROG_Ally_Anatase.7z" "${{ github.workspace }}\x64\Release\a\*.*"
+
+      - name: Upload Chimera Phase 1B artifact
+        uses: actions/upload-artifact@v7.0.0
+        with:
+          name: Chimera_Phase1B_ROG_Ally_Anatase
+          path: ${{ github.workspace }}\Chimera_Phase1B_ROG_Ally_Anatase.7z
+          archive: false
+          compression-level: 0
+          if-no-files-found: error
