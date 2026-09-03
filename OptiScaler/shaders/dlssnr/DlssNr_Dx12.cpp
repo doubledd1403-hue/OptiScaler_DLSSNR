@@ -21,10 +21,38 @@
 #include <mutex>
 #include <algorithm>
 #include <cstring>
+#include <dxgi1_4.h>
 #include "precompile/DlssNr_Shader.h"
 
 namespace
 {
+
+bool ChimeraIsAmdD3D12Device(ID3D12Device* device)
+{
+    if (device == nullptr)
+        return false;
+
+    IDXGIFactory4* factory = nullptr;
+
+    if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) || factory == nullptr)
+        return false;
+
+    IDXGIAdapter1* adapter = nullptr;
+    const HRESULT enumResult =
+        factory->EnumAdapterByLuid(device->GetAdapterLuid(), IID_PPV_ARGS(&adapter));
+
+    factory->Release();
+
+    if (FAILED(enumResult) || adapter == nullptr)
+        return false;
+
+    DXGI_ADAPTER_DESC1 desc {};
+    const HRESULT descResult = adapter->GetDesc1(&desc);
+    adapter->Release();
+
+    return SUCCEEDED(descResult) && desc.VendorId == 0x1002u;
+}
+
 // NGX result codes, by name.
 //
 // A user's log recently read "init 0x-452FFFFF", which is an int formatted as hex and is
@@ -177,6 +205,11 @@ struct NrState
 
     NVSDK_NGX_Parameter* capabilityParams = nullptr;
     void* feature = nullptr;
+
+    // Chimera Phase 1B: AMD D3D12/Proton proof path.
+    bool chimeraAmdDx12 = false;
+    bool chimeraDx12SelectedReported = false;
+    bool chimeraDx12EncodeReported = false;
 
     // The model cannot read and write one resource, so the frame is staged through these.
     ID3D12Resource* colorCopy = nullptr;
@@ -1128,6 +1161,14 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     const auto width = (unsigned int) desc.Width;
     const auto height = desc.Height;
 
+    g_nr.chimeraAmdDx12 = ChimeraIsAmdD3D12Device(device);
+
+    if (g_nr.chimeraAmdDx12 && !g_nr.chimeraDx12SelectedReported)
+    {
+        g_nr.chimeraDx12SelectedReported = true;
+        LOG_INFO("CHIMERA AMD D3D12 STUB: selected AMD backend (DX12/Proton path)");
+    }
+
     // Depth and motion vectors are the upscaler's inputs and so are at render resolution, while colour
     // and output are at display resolution. The model takes that as a subrect per resource rather than
     // needing them resampled, which is why nothing here rescales anything.
@@ -1194,10 +1235,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                  g_nr.guideMvScaleY, guideWidth, guideHeight, width, height);
     }
 
-    if (cfg.DlssNrProxyProbe.value_or_default())
+    if (!g_nr.chimeraAmdDx12 && cfg.DlssNrProxyProbe.value_or_default())
         ProbeProxyDispatch(cmdList);
 
-    if (!EnsureForwarder() || !EnsureCapabilityParams(device))
+    if (!g_nr.chimeraAmdDx12 && (!EnsureForwarder() || !EnsureCapabilityParams(device)))
     {
         g_nr.failed = true;
         LOG_ERROR("DLSS-NR unavailable: {}", g_nr.reason);
@@ -1288,8 +1329,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             LOG_INFO("DLSS-NR: white point meter up, {}x{} tiles", kDlssNrMeterGrid, kDlssNrMeterGrid);
     }
 
-    if (g_nr.feature == nullptr && g_nr.output != nullptr && g_nr.colorCopy != nullptr &&
-        g_nr.hdrCopy != nullptr)
+    if (!g_nr.chimeraAmdDx12 && g_nr.feature == nullptr && g_nr.output != nullptr &&
+        g_nr.colorCopy != nullptr && g_nr.hdrCopy != nullptr)
     {
         auto snippet = Util::FindFilePath(g_dllDir, "nvngx_dlssnr.dll");
 
@@ -1347,10 +1388,18 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         return;
     }
 
-    if (g_nr.feature == nullptr)
+    if (!g_nr.chimeraAmdDx12 && g_nr.feature == nullptr)
     {
         device->Release();
         return;
+    }
+
+    if (g_nr.chimeraAmdDx12)
+    {
+        g_nr.width = width;
+        g_nr.height = height;
+        g_nr.workWidth = workWidth;
+        g_nr.workHeight = workHeight;
     }
 
     // The upscaler has just written this, so it is a UAV. The model needs it readable.
@@ -1504,6 +1553,27 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     Barrier(cmdList, g_nr.hdrCopy, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    // Chimera Phase 1B stops after OptiScaler's existing Encode compute pass.
+    // This proves that a normal DX12 game under Proton/vkd3d reaches our AMD
+    // compute insertion point without loading NVIDIA's Neural Rendering runtime.
+    if (g_nr.chimeraAmdDx12)
+    {
+        if (!g_nr.chimeraDx12EncodeReported)
+        {
+            g_nr.chimeraDx12EncodeReported = true;
+            LOG_INFO("CHIMERA AMD D3D12 STUB: SUCCESS - compute encode reached ({}x{}, guides {}x{})",
+                     width, height, guideWidth, guideHeight);
+        }
+
+        Barrier(cmdList, g_nr.colorCopy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        Barrier(cmdList, g_nr.hdrCopy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        device->Release();
+        return;
+    }
 
     // Below full resolution the model is shown a filtered shrink of the proxy; the edit it returns is
     // enlarged during the resolve while the frame underneath stays full size and untouched.
@@ -1949,7 +2019,7 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
 
 // The pass. Resources in, nothing read from anywhere the caller cannot see.
 
-bool IsRunning() { return g_nr.feature != nullptr && !g_nr.failed; }
+bool IsRunning() { return (g_nr.feature != nullptr || g_nr.chimeraAmdDx12) && !g_nr.failed; }
 
 const char* FailureReason() { return g_nr.failed ? g_nr.reason : ""; }
 
@@ -2051,6 +2121,10 @@ void Shutdown()
         g_nr.motionClone->Release();
         g_nr.motionClone = nullptr;
     }
+
+    g_nr.chimeraAmdDx12 = false;
+    g_nr.chimeraDx12SelectedReported = false;
+    g_nr.chimeraDx12EncodeReported = false;
 
     g_capture.release();
     g_gpuTime.reset();
