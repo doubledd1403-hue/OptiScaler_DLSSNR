@@ -65,6 +65,9 @@ struct VkState
     bool ngxInitialised = false;
     void* feature = nullptr;
     NVSDK_NGX_Parameter* capabilityParams = nullptr;
+    bool chimeraAmd = false;
+    bool chimeraSelectedReported = false;
+    bool chimeraEncodeReported = false;
 
     // What the model writes, the proxy it is shown, and the frame as the upscaler left it.
     OwnedImage output;
@@ -354,7 +357,7 @@ std::optional<std::filesystem::path> FindSnippet()
 
 // ---------------------------------------------------------------------------------------------
 
-bool IsRunningVk() { return g_vk.feature != nullptr && !g_vk.failed; }
+bool IsRunningVk() { return (g_vk.feature != nullptr || g_vk.chimeraAmd) && !g_vk.failed; }
 
 const char* FailureReasonVk() { return g_vk.failed ? g_vk.reason : ""; }
 
@@ -455,54 +458,69 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
         g_vk.physicalDevice = physicalDevice;
     }
 
-    if (!LoadForwarder())
-        return;
+    VkPhysicalDeviceProperties physicalDeviceProperties {};
+    vkGetPhysicalDeviceProperties(physicalDevice, &physicalDeviceProperties);
+    g_vk.chimeraAmd = physicalDeviceProperties.vendorID == 0x1002;
 
-    // Initialise NGX on this device, once. The snippet path is the model itself; the forwarder loads
-    // it so the caller gate sees a module named nvngx.dll.
-    if (!g_vk.ngxInitialised)
+    if (g_vk.chimeraAmd)
     {
-        auto snippet = FindSnippet();
-
-        if (!snippet.has_value())
+        if (!g_vk.chimeraSelectedReported)
         {
-            Fail("nvngx_dlssnr.dll was not found beside OptiScaler or the game");
-            return;
+            g_vk.chimeraSelectedReported = true;
+            LOG_INFO("CHIMERA AMD STUB: selected Vulkan backend");
         }
-
-        const int probe = g_vk.probe != nullptr ? g_vk.probe(snippet->wstring().c_str()) : 0;
-
-        // Four bits, one per entry point. Anything short of fifteen means the model's Vulkan surface
-        // is not entirely reachable and there is no point going further.
-        if (probe != 15)
-        {
-            LOG_ERROR("DLSS-NR Vulkan: the model's Vulkan surface is incomplete (probe {})", probe);
-            Fail("the model does not expose a complete Vulkan surface");
-            return;
-        }
-
-        const int result =
-            g_vk.init(snippet->wstring().c_str(), State::Instance().NVNGX_ApplicationDataPath.c_str(),
-                      (void*) instance, (void*) physicalDevice, (void*) device, 0x0000015);
-
-        if (result != 1)
-        {
-            LOG_ERROR("DLSS-NR Vulkan: NVSDK_NGX_VULKAN_Init_Ext returned {}", result);
-            Fail("the model would not initialise on this Vulkan device");
-            return;
-        }
-
-        g_vk.ngxInitialised = true;
-        LOG_INFO("DLSS-NR Vulkan: the model initialised on this device");
     }
-
-    if (g_vk.capabilityParams == nullptr)
+    else
     {
-        if (NVSDK_NGX_VULKAN_AllocateParameters(&g_vk.capabilityParams) != NVSDK_NGX_Result_Success ||
-            g_vk.capabilityParams == nullptr)
-        {
-            Fail("a parameter block could not be allocated");
+        if (!LoadForwarder())
             return;
+
+        // Initialise NGX on this device, once. The snippet path is the model itself; the forwarder loads
+        // it so the caller gate sees a module named nvngx.dll.
+        if (!g_vk.ngxInitialised)
+        {
+            auto snippet = FindSnippet();
+
+            if (!snippet.has_value())
+            {
+                Fail("nvngx_dlssnr.dll was not found beside OptiScaler or the game");
+                return;
+            }
+
+            const int probe = g_vk.probe != nullptr ? g_vk.probe(snippet->wstring().c_str()) : 0;
+
+            // Four bits, one per entry point. Anything short of fifteen means the model's Vulkan surface
+            // is not entirely reachable and there is no point going further.
+            if (probe != 15)
+            {
+                LOG_ERROR("DLSS-NR Vulkan: the model's Vulkan surface is incomplete (probe {})", probe);
+                Fail("the model does not expose a complete Vulkan surface");
+                return;
+            }
+
+            const int result =
+                g_vk.init(snippet->wstring().c_str(), State::Instance().NVNGX_ApplicationDataPath.c_str(),
+                          (void*) instance, (void*) physicalDevice, (void*) device, 0x0000015);
+
+            if (result != 1)
+            {
+                LOG_ERROR("DLSS-NR Vulkan: NVSDK_NGX_VULKAN_Init_Ext returned {}", result);
+                Fail("the model would not initialise on this Vulkan device");
+                return;
+            }
+
+            g_vk.ngxInitialised = true;
+            LOG_INFO("DLSS-NR Vulkan: the model initialised on this device");
+        }
+
+        if (g_vk.capabilityParams == nullptr)
+        {
+            if (NVSDK_NGX_VULKAN_AllocateParameters(&g_vk.capabilityParams) != NVSDK_NGX_Result_Success ||
+                g_vk.capabilityParams == nullptr)
+            {
+                Fail("a parameter block could not be allocated");
+                return;
+            }
         }
     }
 
@@ -567,7 +585,7 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
         g_vk.reset = true;
     }
 
-    if (g_vk.feature == nullptr)
+    if (!g_vk.chimeraAmd && g_vk.feature == nullptr)
     {
         g_vk.feature = g_vk.create(
             (void*) cmdBuffer, g_vk.capabilityParams, width, height, (int) cfg.DlssNrPreset.value_or_default(),
@@ -646,6 +664,18 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
                              VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE, g_vk.proxy.view, g_vk.keep.view))
     {
         Fail("the encode dispatch failed");
+        return;
+    }
+
+    if (g_vk.chimeraAmd)
+    {
+        if (!g_vk.chimeraEncodeReported)
+        {
+            g_vk.chimeraEncodeReported = true;
+            LOG_INFO("CHIMERA AMD STUB: SUCCESS - native Vulkan compute encode reached ({}x{}, guides {}x{})",
+                     width, height, guideWidth, guideHeight);
+        }
+
         return;
     }
 
@@ -758,6 +788,9 @@ void ShutdownVk()
     g_vk.width = 0;
     g_vk.height = 0;
     g_vk.ngxInitialised = false;
+    g_vk.chimeraAmd = false;
+    g_vk.chimeraSelectedReported = false;
+    g_vk.chimeraEncodeReported = false;
     g_vk.reset = true;
 }
 
