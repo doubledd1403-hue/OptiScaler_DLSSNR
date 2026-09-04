@@ -1,0 +1,263 @@
+name: Chimera Lite Standalone - Auto Build
+
+on:
+  push:
+    branches:
+      - chimera-amd-nr
+    paths:
+      - '.github/workflows/chimera_lite_standalone_autorun.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout build host
+        uses: actions/checkout@v6
+
+      - name: Clone ReshadeckPlus base
+        shell: bash
+        run: |
+          git clone --recursive https://github.com/jeanbottein/ReshadeckPlus.git ChimeraLite
+          cd ChimeraLite
+          git checkout b7976d615e9dadb4685e73b753c649bf38726556
+          git submodule update --init --recursive
+
+      - name: Convert base into standalone Chimera Lite plugin
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import json, re
+
+          root = Path('ChimeraLite')
+
+          plugin_path = root / 'plugin.json'
+          plugin = json.loads(plugin_path.read_text(encoding='utf-8'))
+          plugin['name'] = 'Chimera Lite'
+          plugin['author'] = 'Chimera experiment; based on Reshadeck+ by Jariullah Safi, mspeedo and Jean Bottein'
+          plugin.setdefault('publish', {})['description'] = (
+              'Lightweight final-image enhancement for Gamescope. '
+              'Designed for live A/B testing on AMD handhelds.'
+          )
+          plugin_path.write_text(json.dumps(plugin, indent=2) + '\n', encoding='utf-8')
+
+          package_path = root / 'package.json'
+          package = json.loads(package_path.read_text(encoding='utf-8'))
+          package['name'] = 'chimera-lite'
+          package['version'] = '0.1.0'
+          package['description'] = 'Standalone lightweight Gamescope image enhancement'
+          package_path.write_text(json.dumps(package, indent=2) + '\n', encoding='utf-8')
+
+          build_path = root / 'build_release.sh'
+          build = build_path.read_text(encoding='utf-8')
+          build = build.replace('PLUGIN_NAME="ReshadeckPlus"', 'PLUGIN_NAME="ChimeraLite"')
+          build_path.write_text(build, encoding='utf-8')
+
+          shaders = root / 'shaders'
+          for fx in shaders.rglob('*.fx'):
+              fx.unlink()
+
+          ui_path = root / 'src/index.tsx'
+          ui = ui_path.read_text(encoding='utf-8')
+          ui = ui.replace('Reshadeck+', 'Chimera Lite')
+          ui = ui.replace('Reshadeck checkGame error', 'Chimera Lite checkGame error')
+          ui = ui.replace('No Shader', 'Off')
+          ui = ui.replace('Master Switch', 'Chimera Enhancement')
+          ui = ui.replace(
+              'Disabling the master switch will prevent shaders from applying.',
+              'Choose Off for the untouched image, or switch between Chimera modes live for A/B comparison.'
+          )
+          ui = ui.replace(
+              'WARNING: Shaders can lead to dropped frames and possibly even severe performance problems.',
+              'Chimera Lite is the low-cost mode. Chimera Strong is intentionally more visible for comparison.'
+          )
+          ui_path.write_text(ui, encoding='utf-8')
+
+          main_path = root / 'main.py'
+          main = main_path.read_text(encoding='utf-8')
+          main = main.replace(
+              'old_dir = decky_plugin.DECKY_USER_HOME + "/homebrew/plugins/Reshadeck"',
+              'old_dir = "/__chimera_no_legacy_conflict__"'
+          )
+
+          pattern = re.compile(
+              r'    async def reset_reshade_directory\(self\):.*?'
+              r'(?=    async def reset_configuration\(self\):)',
+              re.S
+          )
+          replacement = '''    async def reset_reshade_directory(self):
+              # Reset only Chimera-owned files; preserve other Gamescope effects.
+              try:
+                  target = Path(destination_folder)
+                  if target.exists():
+                      for p in target.glob("Chimera_*.fx"):
+                          p.unlink(missing_ok=True)
+                      for p in target.glob(".reshadeck.active.*.fx"):
+                          p.unlink(missing_ok=True)
+                      (target / ".reshadeck.fx").unlink(missing_ok=True)
+                  Plugin._install_resources()
+                  return True
+              except Exception as e:
+                  logger.error(f"Failed to reset Chimera shader files: {e}")
+                  return False
+
+          '''
+          main, count = pattern.subn(replacement, main, count=1)
+          if count != 1:
+              raise SystemExit('Could not safely patch reset_reshade_directory')
+          main_path.write_text(main, encoding='utf-8')
+
+          notice = root / 'CHIMERA_NOTICE.md'
+          notice.write_text(
+              '# Chimera Lite experimental build\n\n'
+              'This Decky package is derived from ReshadeckPlus (GPL-3.0) and retains its LICENSE. '
+              'The Chimera shaders and branding are experimental additions for lightweight Gamescope image enhancement.\n',
+              encoding='utf-8'
+          )
+
+          print('Converted ReshadeckPlus base to standalone Chimera Lite identity')
+          PY
+
+      - name: Add Chimera Lite and Strong shaders
+        shell: bash
+        run: |
+          cat > ChimeraLite/shaders/Chimera_Lite.fx <<'FX'
+          uniform float DetailStrength <
+              ui_type = "drag";
+              ui_min = 0.0;
+              ui_max = 1.0;
+              ui_step = 0.01;
+              ui_label = "Detail Strength";
+          > = 0.30;
+
+          uniform float ToneStrength <
+              ui_type = "drag";
+              ui_min = 0.0;
+              ui_max = 0.30;
+              ui_step = 0.01;
+              ui_label = "Local Tone";
+          > = 0.08;
+
+          uniform float Protection <
+              ui_type = "drag";
+              ui_min = 0.0;
+              ui_max = 1.0;
+              ui_step = 0.01;
+              ui_label = "UI / Halo Protection";
+          > = 0.80;
+
+          uniform float iGlobalTime < source = "timer"; >;
+
+          #include "ReShade.fxh"
+
+          static const float2 ChimeraPixel = float2(BUFFER_RCP_WIDTH, BUFFER_RCP_HEIGHT);
+
+          float ChimeraLuma(float3 c)
+          {
+              return dot(c, float3(0.2126, 0.7152, 0.0722));
+          }
+
+          void ChimeraPass(float4 pos : SV_Position, float2 uv : TexCoord, out float3 color : SV_Target)
+          {
+              float3 c = tex2D(ReShade::BackBuffer, uv).rgb;
+              float3 n = tex2D(ReShade::BackBuffer, uv + ChimeraPixel * float2( 0.0, -1.0)).rgb;
+              float3 s = tex2D(ReShade::BackBuffer, uv + ChimeraPixel * float2( 0.0,  1.0)).rgb;
+              float3 w = tex2D(ReShade::BackBuffer, uv + ChimeraPixel * float2(-1.0,  0.0)).rgb;
+              float3 e = tex2D(ReShade::BackBuffer, uv + ChimeraPixel * float2( 1.0,  0.0)).rgb;
+
+              float3 avg = (n + s + w + e) * 0.25;
+              float3 localMin = min(c, min(min(n, s), min(w, e)));
+              float3 localMax = max(c, max(max(n, s), max(w, e)));
+
+              float lc = ChimeraLuma(c);
+              float la = ChimeraLuma(avg);
+              float lmin = ChimeraLuma(localMin);
+              float lmax = ChimeraLuma(localMax);
+              float contrast = max(0.0, lmax - lmin);
+              float micro = abs(lc - la);
+
+              float fineGate = smoothstep(0.003, 0.045, micro);
+              float edgeRisk = smoothstep(0.18, 0.52, contrast);
+              float shadowGate = smoothstep(0.025, 0.12, lc);
+              float highlightGate = 1.0 - smoothstep(0.84, 1.02, lc);
+
+              float maxC = max(c.r, max(c.g, c.b));
+              float minC = min(c.r, min(c.g, c.b));
+              float chroma = maxC - minC;
+              float uiRisk = edgeRisk * smoothstep(0.20, 0.58, chroma);
+              float safety = 1.0 - saturate(Protection) * 0.82 * uiRisk;
+
+              float structureGate =
+                  fineGate * (1.0 - 0.72 * edgeRisk) * shadowGate * highlightGate;
+
+              float3 detailResidual =
+                  (c - avg) * DetailStrength * structureGate;
+
+              float toneBias = clamp((0.50 - la) * ToneStrength, -0.035, 0.035);
+              float3 toneResidual = c * (1.0 - c) * toneBias;
+
+              float3 outColor = c + (detailResidual + toneResidual) * safety;
+              float envelope = 0.012 + contrast * 0.045;
+              outColor = clamp(outColor, localMin - envelope, localMax + envelope);
+              color = saturate(outColor);
+          }
+
+          technique ChimeraLite
+          {
+              pass
+              {
+                  VertexShader = PostProcessVS;
+                  PixelShader = ChimeraPass;
+              }
+          }
+          FX
+
+          cp ChimeraLite/shaders/Chimera_Lite.fx ChimeraLite/shaders/Chimera_Strong.fx
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('ChimeraLite/shaders/Chimera_Strong.fx')
+          t = p.read_text(encoding='utf-8')
+          t = t.replace('> = 0.30;', '> = 0.52;', 1)
+          t = t.replace('> = 0.08;', '> = 0.14;', 1)
+          t = t.replace('technique ChimeraLite', 'technique ChimeraStrong')
+          p.write_text(t, encoding='utf-8')
+          PY
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '16'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: '7'
+          run_install: false
+
+      - name: Build standalone Chimera Decky ZIP
+        shell: bash
+        working-directory: ChimeraLite
+        run: |
+          chmod +x build_release.sh
+          ./build_release.sh
+          ls -lh *.zip
+
+      - name: Verify package identity and shaders
+        shell: bash
+        working-directory: ChimeraLite
+        run: |
+          ZIP="$(ls chimeralite-0.1.0.zip | head -n 1)"
+          unzip -l "$ZIP" | grep 'ChimeraLite/plugin.json'
+          unzip -p "$ZIP" ChimeraLite/plugin.json | grep '"name": "Chimera Lite"'
+          unzip -l "$ZIP" | grep 'ChimeraLite/shaders/Chimera_Lite.fx'
+          unzip -l "$ZIP" | grep 'ChimeraLite/shaders/Chimera_Strong.fx'
+          cp "$ZIP" ../Chimera-Lite-Standalone-Decky.zip
+
+      - name: Upload standalone Chimera Lite plugin
+        uses: actions/upload-artifact@v7.0.0
+        with:
+          name: Chimera-Lite-Standalone-Decky
+          path: Chimera-Lite-Standalone-Decky.zip
+          if-no-files-found: error
