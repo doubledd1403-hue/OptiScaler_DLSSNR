@@ -1,0 +1,492 @@
+name: Chimera Lite Standalone - Modern Decky Build
+
+on:
+  push:
+    branches:
+      - chimera-amd-nr
+    paths:
+      - '.github/workflows/chimera_lite_standalone_modern_decky.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout build host
+        uses: actions/checkout@v6
+
+      - name: Clone official Decky plugin template
+        shell: bash
+        run: |
+          git clone --depth 1 https://github.com/SteamDeckHomebrew/decky-plugin-template.git ChimeraLite
+
+      - name: Create current Decky Chimera plugin
+        shell: bash
+        run: |
+          cat > ChimeraLite/plugin.json <<'JSON'
+          {
+            "name": "Chimera Lite",
+            "author": "Chimera experiment",
+            "flags": ["debug"],
+            "api_version": 1,
+            "publish": {
+              "tags": ["graphics", "gamescope", "amd", "handheld"],
+              "description": "Lightweight final-image enhancement for live A/B testing on AMD handhelds.",
+              "image": "https://opengraph.githubassets.com/1/SteamDeckHomebrew/decky-plugin-template"
+            }
+          }
+          JSON
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+          p = Path("ChimeraLite/package.json")
+          j = json.loads(p.read_text())
+          j["name"] = "chimera-lite"
+          j["version"] = "0.2.0"
+          j["description"] = "Standalone Gamescope image enhancement for Decky"
+          j["author"] = "Chimera experiment"
+          j["license"] = "BSD-3-Clause"
+          p.write_text(json.dumps(j, indent=2) + "\n")
+          PY
+
+          cat > ChimeraLite/main.py <<'PY'
+          import asyncio
+          import json
+          import os
+          import shutil
+          import subprocess
+          from pathlib import Path
+
+          import decky
+
+
+          class Plugin:
+              def __init__(self):
+                  self.mode = "off"
+
+              @property
+              def gamescope_shader_dir(self) -> Path:
+                  return Path(decky.DECKY_USER_HOME) / ".local/share/gamescope/reshade/Shaders"
+
+              @property
+              def settings_file(self) -> Path:
+                  return Path(decky.DECKY_SETTINGS_DIR) / "settings.json"
+
+              def _load_mode(self) -> str:
+                  try:
+                      data = json.loads(self.settings_file.read_text(encoding="utf-8"))
+                      value = str(data.get("mode", "off")).lower()
+                      return value if value in {"off", "lite", "strong"} else "off"
+                  except Exception:
+                      return "off"
+
+              def _save_mode(self) -> None:
+                  try:
+                      self.settings_file.parent.mkdir(parents=True, exist_ok=True)
+                      self.settings_file.write_text(
+                          json.dumps({"mode": self.mode}, indent=2) + "\n",
+                          encoding="utf-8",
+                      )
+                  except Exception as exc:
+                      decky.logger.error(f"Chimera: failed to save settings: {exc}")
+
+              def _install_shaders(self) -> None:
+                  self.gamescope_shader_dir.mkdir(parents=True, exist_ok=True)
+                  source_dir = Path(decky.DECKY_PLUGIN_DIR) / "shaders"
+                  for name in ("Chimera_Lite.fx", "Chimera_Strong.fx"):
+                      shutil.copy2(source_dir / name, self.gamescope_shader_dir / name)
+
+              def _set_gamescope_effect(self, filename: str | None) -> bool:
+                  env = os.environ.copy()
+                  env["DISPLAY"] = ":0"
+                  try:
+                      if filename is None:
+                          result = subprocess.run(
+                              ["xprop", "-root", "-remove", "GAMESCOPE_RESHADE_EFFECT"],
+                              env=env,
+                              stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE,
+                              text=True,
+                              timeout=4,
+                              check=False,
+                          )
+                          # xprop returns non-zero if property did not exist; "off" is still achieved.
+                          return True
+
+                      result = subprocess.run(
+                          [
+                              "xprop", "-root",
+                              "-f", "GAMESCOPE_RESHADE_EFFECT", "8u",
+                              "-set", "GAMESCOPE_RESHADE_EFFECT", filename,
+                          ],
+                          env=env,
+                          stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE,
+                          text=True,
+                          timeout=4,
+                          check=False,
+                      )
+                      if result.returncode != 0:
+                          decky.logger.error(
+                              f"Chimera: xprop failed ({result.returncode}): {result.stderr.strip()}"
+                          )
+                          return False
+                      return True
+                  except Exception as exc:
+                      decky.logger.error(f"Chimera: failed to set Gamescope effect: {exc}")
+                      return False
+
+              def _apply_mode(self, mode: str) -> bool:
+                  if mode == "off":
+                      return self._set_gamescope_effect(None)
+                  if mode == "lite":
+                      return self._set_gamescope_effect("Chimera_Lite.fx")
+                  if mode == "strong":
+                      return self._set_gamescope_effect("Chimera_Strong.fx")
+                  return False
+
+              async def get_mode(self) -> str:
+                  return self.mode
+
+              async def set_mode(self, mode: str) -> dict:
+                  requested = str(mode).lower()
+                  if requested not in {"off", "lite", "strong"}:
+                      return {"ok": False, "mode": self.mode, "error": "invalid mode"}
+
+                  self._install_shaders()
+                  ok = self._apply_mode(requested)
+                  if ok:
+                      self.mode = requested
+                      self._save_mode()
+                  return {"ok": ok, "mode": self.mode}
+
+              async def ping(self) -> dict:
+                  return {
+                      "ok": True,
+                      "mode": self.mode,
+                      "shader_dir": str(self.gamescope_shader_dir),
+                  }
+
+              async def _main(self):
+                  decky.logger.info("Chimera Lite backend starting")
+                  self._install_shaders()
+                  self.mode = self._load_mode()
+                  # Restore the user's last A/B choice after Decky reload.
+                  self._apply_mode(self.mode)
+
+              async def _unload(self):
+                  decky.logger.info("Chimera Lite backend unloading")
+
+              async def _uninstall(self):
+                  self._set_gamescope_effect(None)
+                  for name in ("Chimera_Lite.fx", "Chimera_Strong.fx"):
+                      try:
+                          (self.gamescope_shader_dir / name).unlink(missing_ok=True)
+                      except Exception:
+                          pass
+          PY
+
+          cat > ChimeraLite/src/index.tsx <<'TSX'
+          import {
+            DropdownItem,
+            Field,
+            PanelSection,
+            PanelSectionRow,
+            staticClasses
+          } from "@decky/ui";
+          import {
+            callable,
+            definePlugin,
+            toaster
+          } from "@decky/api";
+          import { useEffect, useState } from "react";
+          import { FaMagic } from "react-icons/fa";
+
+          type Mode = "off" | "lite" | "strong";
+
+          const getMode = callable<[], Mode>("get_mode");
+          const setMode = callable<[mode: Mode], { ok: boolean; mode: Mode; error?: string }>("set_mode");
+          const ping = callable<[], { ok: boolean; mode: Mode; shader_dir: string }>("ping");
+
+          const MODE_OPTIONS = [
+            { data: "off", label: "Off (original image)" },
+            { data: "lite", label: "Chimera Lite" },
+            { data: "strong", label: "Chimera Strong" }
+          ];
+
+          function Content() {
+            const [mode, setModeState] = useState<Mode>("off");
+            const [status, setStatus] = useState("Loading…");
+            const [busy, setBusy] = useState(false);
+
+            useEffect(() => {
+              (async () => {
+                try {
+                  const backend = await ping();
+                  const current = await getMode();
+                  setModeState(current);
+                  setStatus(backend.ok ? "Ready — final Gamescope image path" : "Backend unavailable");
+                } catch (e) {
+                  console.error("Chimera init failed", e);
+                  setStatus("Backend failed to start");
+                }
+              })();
+            }, []);
+
+            const changeMode = async (next: Mode) => {
+              if (busy) return;
+              setBusy(true);
+              try {
+                const result = await setMode(next);
+                if (!result.ok) {
+                  toaster.toast({
+                    title: "Chimera Lite",
+                    body: result.error ?? "Could not apply Gamescope effect"
+                  });
+                }
+                setModeState(result.mode);
+              } catch (e) {
+                console.error("Chimera mode change failed", e);
+                toaster.toast({
+                  title: "Chimera Lite",
+                  body: "Mode change failed. Check Decky log."
+                });
+              } finally {
+                setBusy(false);
+              }
+            };
+
+            return (
+              <>
+                <PanelSection title="Image Enhancement">
+                  <PanelSectionRow>
+                    <DropdownItem
+                      layout="below"
+                      label="Enhancement"
+                      description="Switch live for A/B comparison. Off is the untouched Gamescope image."
+                      menuLabel="Chimera enhancement"
+                      selectedOption={mode}
+                      rgOptions={MODE_OPTIONS}
+                      disabled={busy}
+                      onChange={(option) => void changeMode(String(option.data) as Mode)}
+                    />
+                  </PanelSectionRow>
+                  <PanelSectionRow>
+                    <Field
+                      label="Status"
+                      description="Independent of MAKO. Works on the final Gamescope image."
+                    >
+                      {status}
+                    </Field>
+                  </PanelSectionRow>
+                </PanelSection>
+
+                <PanelSection title="Test">
+                  <PanelSectionRow>
+                    <Field
+                      label="Recommended comparison"
+                      description="Stand still in a detailed scene and switch Off → Lite → Strong while watching FPS and fine texture."
+                    >
+                      1080p output
+                    </Field>
+                  </PanelSectionRow>
+                </PanelSection>
+              </>
+            );
+          }
+
+          export default definePlugin(() => ({
+            name: "Chimera Lite",
+            titleView: <div className={staticClasses.Title}>Chimera Lite</div>,
+            content: <Content />,
+            icon: <FaMagic />,
+            onDismount() {}
+          }));
+          TSX
+
+          mkdir -p ChimeraLite/shaders
+
+          cat > ChimeraLite/shaders/Chimera_Lite.fx <<'FX'
+          #include "ReShade.fxh"
+
+          static const float2 px = float2(BUFFER_RCP_WIDTH, BUFFER_RCP_HEIGHT);
+
+          float luma(float3 c)
+          {
+              return dot(c, float3(0.2126, 0.7152, 0.0722));
+          }
+
+          void ChimeraLitePass(
+              float4 pos : SV_Position,
+              float2 uv : TexCoord,
+              out float3 color : SV_Target)
+          {
+              float3 c = tex2D(ReShade::BackBuffer, uv).rgb;
+              float3 n = tex2D(ReShade::BackBuffer, uv + px * float2(0.0, -1.0)).rgb;
+              float3 s = tex2D(ReShade::BackBuffer, uv + px * float2(0.0,  1.0)).rgb;
+              float3 w = tex2D(ReShade::BackBuffer, uv + px * float2(-1.0, 0.0)).rgb;
+              float3 e = tex2D(ReShade::BackBuffer, uv + px * float2( 1.0, 0.0)).rgb;
+
+              float3 avg = (n + s + w + e) * 0.25;
+              float3 lo = min(c, min(min(n, s), min(w, e)));
+              float3 hi = max(c, max(max(n, s), max(w, e)));
+
+              float lc = luma(c);
+              float la = luma(avg);
+              float contrast = max(0.0, luma(hi) - luma(lo));
+              float micro = abs(lc - la);
+
+              float fine = smoothstep(0.003, 0.045, micro);
+              float edge = smoothstep(0.18, 0.52, contrast);
+              float luminanceGate =
+                  smoothstep(0.025, 0.12, lc) *
+                  (1.0 - smoothstep(0.84, 1.02, lc));
+
+              float structureGate = fine * (1.0 - 0.72 * edge) * luminanceGate;
+              float3 detail = (c - avg) * (0.30 * structureGate);
+
+              float tone = clamp((0.50 - la) * 0.08, -0.035, 0.035);
+              float3 toneResidual = c * (1.0 - c) * tone;
+
+              float3 outColor = c + detail + toneResidual;
+              float envelope = 0.012 + contrast * 0.045;
+              color = saturate(clamp(outColor, lo - envelope, hi + envelope));
+          }
+
+          technique ChimeraLite
+          {
+              pass
+              {
+                  VertexShader = PostProcessVS;
+                  PixelShader = ChimeraLitePass;
+              }
+          }
+          FX
+
+          cat > ChimeraLite/shaders/Chimera_Strong.fx <<'FX'
+          #include "ReShade.fxh"
+
+          static const float2 px = float2(BUFFER_RCP_WIDTH, BUFFER_RCP_HEIGHT);
+
+          float luma(float3 c)
+          {
+              return dot(c, float3(0.2126, 0.7152, 0.0722));
+          }
+
+          void ChimeraStrongPass(
+              float4 pos : SV_Position,
+              float2 uv : TexCoord,
+              out float3 color : SV_Target)
+          {
+              float3 c = tex2D(ReShade::BackBuffer, uv).rgb;
+              float3 n = tex2D(ReShade::BackBuffer, uv + px * float2(0.0, -1.0)).rgb;
+              float3 s = tex2D(ReShade::BackBuffer, uv + px * float2(0.0,  1.0)).rgb;
+              float3 w = tex2D(ReShade::BackBuffer, uv + px * float2(-1.0, 0.0)).rgb;
+              float3 e = tex2D(ReShade::BackBuffer, uv + px * float2( 1.0, 0.0)).rgb;
+
+              float3 avg = (n + s + w + e) * 0.25;
+              float3 lo = min(c, min(min(n, s), min(w, e)));
+              float3 hi = max(c, max(max(n, s), max(w, e)));
+
+              float lc = luma(c);
+              float la = luma(avg);
+              float contrast = max(0.0, luma(hi) - luma(lo));
+              float micro = abs(lc - la);
+
+              float fine = smoothstep(0.002, 0.040, micro);
+              float edge = smoothstep(0.20, 0.58, contrast);
+              float luminanceGate =
+                  smoothstep(0.020, 0.10, lc) *
+                  (1.0 - smoothstep(0.88, 1.03, lc));
+
+              float structureGate = fine * (1.0 - 0.58 * edge) * luminanceGate;
+              float3 detail = (c - avg) * (0.52 * structureGate);
+
+              float tone = clamp((0.50 - la) * 0.14, -0.050, 0.050);
+              float3 toneResidual = c * (1.0 - c) * tone;
+
+              float3 outColor = c + detail + toneResidual;
+              float envelope = 0.018 + contrast * 0.060;
+              color = saturate(clamp(outColor, lo - envelope, hi + envelope));
+          }
+
+          technique ChimeraStrong
+          {
+              pass
+              {
+                  VertexShader = PostProcessVS;
+                  PixelShader = ChimeraStrongPass;
+              }
+          }
+          FX
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Enable pnpm
+        shell: bash
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.23.0 --activate
+
+      - name: Build current Decky frontend
+        shell: bash
+        working-directory: ChimeraLite
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run build
+          test -f dist/index.js
+
+      - name: Package Decky ZIP
+        shell: bash
+        run: |
+          rm -rf package-root
+          mkdir -p package-root/ChimeraLite
+          cp ChimeraLite/plugin.json package-root/ChimeraLite/
+          cp ChimeraLite/package.json package-root/ChimeraLite/
+          cp ChimeraLite/main.py package-root/ChimeraLite/
+          cp ChimeraLite/LICENSE package-root/ChimeraLite/
+          cp -R ChimeraLite/dist package-root/ChimeraLite/
+          cp -R ChimeraLite/shaders package-root/ChimeraLite/
+          cd package-root
+          zip -r ../Chimera-Lite-Decky-v0.2.0.zip ChimeraLite
+
+      - name: Validate exact Decky contract
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, zipfile
+          p = "Chimera-Lite-Decky-v0.2.0.zip"
+          with zipfile.ZipFile(p) as z:
+              names = set(z.namelist())
+              required = {
+                  "ChimeraLite/plugin.json",
+                  "ChimeraLite/package.json",
+                  "ChimeraLite/main.py",
+                  "ChimeraLite/dist/index.js",
+                  "ChimeraLite/shaders/Chimera_Lite.fx",
+                  "ChimeraLite/shaders/Chimera_Strong.fx",
+              }
+              missing = sorted(required - names)
+              if missing:
+                  raise SystemExit(f"Missing required Decky files: {missing}")
+              manifest = json.loads(z.read("ChimeraLite/plugin.json"))
+              package = json.loads(z.read("ChimeraLite/package.json"))
+              assert manifest["name"] == "Chimera Lite"
+              assert manifest["api_version"] == 1
+              assert package["type"] == "module"
+          print("Decky contract OK")
+          PY
+          unzip -l Chimera-Lite-Decky-v0.2.0.zip | sed -n '1,40p'
+          ls -lh Chimera-Lite-Decky-v0.2.0.zip
+
+      - name: Upload Chimera Lite Decky plugin
+        uses: actions/upload-artifact@v7.0.0
+        with:
+          name: Chimera-Lite-Decky-v0.2.0
+          path: Chimera-Lite-Decky-v0.2.0.zip
+          if-no-files-found: error
