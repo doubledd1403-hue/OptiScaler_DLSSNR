@@ -1,0 +1,186 @@
+name: Chimera Lite MAKO Phase 2A - Auto Build
+
+on:
+  push:
+    branches:
+      - chimera-amd-nr
+    paths:
+      - '.github/workflows/chimera_lite_mako_phase2a_autorun.yml'
+  workflow_dispatch:
+
+jobs:
+  build-chimera-lite-mako:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout build host
+        uses: actions/checkout@v6
+
+      - name: Install Linux build dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git curl python3 \
+            llvm clang clang-tools clang-tidy \
+            cmake ninja-build pkg-config g++-multilib ccache \
+            libvulkan-dev libx11-dev mesa-common-dev \
+            qt6-base-dev qt6-base-dev-tools \
+            qt6-tools-dev qt6-tools-dev-tools \
+            qt6-declarative-dev qt6-declarative-dev-tools \
+            glslang-tools zip unzip xz-utils jq patchelf rsync file
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Enable pnpm
+        shell: bash
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.17.0 --activate
+          pnpm --version
+
+      - name: Clone pinned MAKO source
+        shell: bash
+        run: |
+          git clone https://github.com/eugeniosegala/MAKO.git MAKO
+          cd MAKO
+          git checkout 94df0249049715013081fc11e83aa9f05059a6c8
+          git rev-parse HEAD
+
+      - name: Apply Chimera Lite Phase 2A screen-space enhancement
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from textwrap import dedent, indent
+
+          shader = Path('MAKO/engine/mako-render/src/shaders/spatial_scaling.comp')
+          text = shader.read_text(encoding='utf-8')
+
+          marker = 'CHIMERA LITE PHASE 2A'
+          if marker in text:
+              print('Chimera Lite Phase 2A already present')
+              raise SystemExit(0)
+
+          old = indent(dedent("""\
+          vec3 envelope = vec3(sharpeningBaseline * (0.02 + contrast * 0.08));
+          sharpened = clamp(
+              sharpened, localMinimum.rgb - envelope, localMaximum.rgb + envelope
+          );
+          imageStore(
+              outputImage, outputCoordinate,
+              vec4(sharpened, clamp(reconstructed.a, 0.0, 1.0))
+          );
+          """), "    ").rstrip()
+
+          new = indent(dedent("""\
+          vec3 envelope = vec3(sharpeningBaseline * (0.02 + contrast * 0.08));
+          sharpened = clamp(
+              sharpened, localMinimum.rgb - envelope, localMaximum.rgb + envelope
+          );
+
+          // CHIMERA LITE PHASE 2A
+          // Lightweight screen-space appearance enhancement for handheld GPUs.
+          // This intentionally reuses values MAKO's scaler already computed:
+          // zero extra texture samples, zero extra images, and zero extra passes.
+          vec3 boundedSharpened = clamp(sharpened, vec3(0.0), vec3(1.0));
+          float baseLuma = luma(baseColor);
+          float averageLuma = luma(localAverage);
+          float microDelta = baseLuma - averageLuma;
+          float detailMagnitude = abs(microDelta);
+
+          // Spend work on fine structure while suppressing large high-contrast
+          // boundaries where screen-space enhancement can halo UI and text.
+          float detailConfidence =
+              smoothstep(0.004, 0.055, detailMagnitude) *
+              (1.0 - smoothstep(0.20, 0.55, contrast));
+          float shadowGate = smoothstep(0.025, 0.12, baseLuma);
+          float highlightGate = 1.0 - smoothstep(0.82, 1.05, baseLuma);
+          float structureGate = detailConfidence * shadowGate * highlightGate;
+
+          // Residual-only enhancement. A future tiny CNN can replace just this
+          // estimator rather than reconstructing an entire RGB frame.
+          vec3 structureResidual =
+              (baseColor - localAverage) * (0.20 * structureGate);
+
+          // Cheap local tone shaping handles part of the desired perceptual lift
+          // without allocating neural-network compute to a trivial operation.
+          float localTone = clamp((0.50 - averageLuma) * 0.055, -0.022, 0.022);
+          vec3 toneResidual =
+              boundedSharpened * (vec3(1.0) - boundedSharpened) * localTone;
+
+          float maximumChannel = max(
+              boundedSharpened.r,
+              max(boundedSharpened.g, boundedSharpened.b)
+          );
+          float minimumChannel = min(
+              boundedSharpened.r,
+              min(boundedSharpened.g, boundedSharpened.b)
+          );
+          float chroma = maximumChannel - minimumChannel;
+          float uiRisk =
+              smoothstep(0.42, 0.82, contrast) * smoothstep(0.22, 0.62, chroma);
+          float safeStrength = 1.0 - 0.75 * uiRisk;
+
+          vec3 chimeraColor = sharpened +
+              (structureResidual + toneResidual) * safeStrength;
+          vec3 chimeraEnvelope = envelope + vec3(0.010 + contrast * 0.035);
+          chimeraColor = clamp(
+              chimeraColor,
+              localMinimum.rgb - chimeraEnvelope,
+              localMaximum.rgb + chimeraEnvelope
+          );
+
+          imageStore(
+              outputImage, outputCoordinate,
+              vec4(chimeraColor, clamp(reconstructed.a, 0.0, 1.0))
+          );
+          """), "    ").rstrip()
+
+          if old not in text:
+              raise SystemExit('Patch anchor not found in pinned MAKO shader')
+
+          shader.write_text(text.replace(old, new, 1), encoding='utf-8')
+          print('Applied Chimera Lite Phase 2A shader patch')
+          PY
+
+      - name: Regenerate embedded SPIR-V
+        shell: bash
+        working-directory: MAKO
+        run: |
+          python3 engine/scripts/generate-spatial-scaling-spirv.py
+          python3 engine/scripts/generate-spatial-scaling-spirv.py --check
+
+      - name: Build fast 64-bit Decky tester package
+        shell: bash
+        working-directory: MAKO/plugin
+        env:
+          MAKO_BUILD_JOBS: '2'
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run package:local-engine-fast
+
+      - name: Locate tester ZIP
+        id: locate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP="$(find MAKO/plugin/out -maxdepth 1 -type f -name '*.zip' | head -n 1)"
+          if [ -z "$ZIP" ]; then
+            echo 'No Decky tester ZIP found'
+            find MAKO/plugin/out -maxdepth 2 -type f -print || true
+            exit 1
+          fi
+          cp "$ZIP" Chimera-Lite-MAKO-Phase2A-ROG-Ally.zip
+          echo "Built package: $ZIP"
+          ls -lh Chimera-Lite-MAKO-Phase2A-ROG-Ally.zip
+
+      - name: Upload Chimera Lite MAKO tester
+        uses: actions/upload-artifact@v7.0.0
+        with:
+          name: Chimera-Lite-MAKO-Phase2A-ROG-Ally
+          path: Chimera-Lite-MAKO-Phase2A-ROG-Ally.zip
+          if-no-files-found: error
