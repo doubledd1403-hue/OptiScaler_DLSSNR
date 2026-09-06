@@ -1,0 +1,482 @@
+name: Chimera Hybrid Phase 1 - SSRTGI + Neural
+
+on:
+  push:
+    branches:
+      - chimera-amd-nr
+    paths:
+      - '.github/workflows/chimera_hybrid_phase1_ssrtgi.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-lighting:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Chimera branch
+        uses: actions/checkout@v6
+        with:
+          ref: chimera-amd-nr
+          submodules: 'true'
+          fetch-depth: 0
+
+      - name: Fetch pinned DLSS Enabler SSRTGI source
+        shell: pwsh
+        run: |
+          git clone --filter=blob:none --no-checkout https://github.com/artur-graniszewski/dlss-enabler-main.git _dlss_enabler
+          Push-Location _dlss_enabler
+          git checkout 62d32511805396d284bf5d60478f964d0ba8d228
+          Pop-Location
+
+      - name: Vendor SSRTGI core and add Chimera lighting wrapper
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force OptiScaler\chimera_ssrtgi | Out-Null
+
+          $src = "_dlss_enabler\Utils"
+          $dst = "OptiScaler\chimera_ssrtgi"
+
+          Copy-Item "$src\SsrtgiPostProcessD3D12.cpp" "$dst\SsrtgiPostProcessD3D12.cpp"
+          Copy-Item "$src\SsrtgiPostProcessD3D12.h" "$dst\SsrtgiPostProcessD3D12.h"
+          Copy-Item "$src\SsrtgiCopyPass_cso.h" "$dst\SsrtgiCopyPass_cso.h"
+          Copy-Item "$src\SsrtgiDenoise_cso.h" "$dst\SsrtgiDenoise_cso.h"
+          Copy-Item "$src\SsrtgiGatherHZB_cso.h" "$dst\SsrtgiGatherHZB_cso.h"
+          Copy-Item "$src\SsrtgiHzbGenerate_cso.h" "$dst\SsrtgiHzbGenerate_cso.h"
+          Copy-Item "$src\SsrtgiTemporal_cso.h" "$dst\SsrtgiTemporal_cso.h"
+          Copy-Item "$src\SsrtgiComposite_cso.h" "$dst\SsrtgiComposite_cso.h"
+
+          @'
+          #pragma once
+          #include "../pch.h"
+
+          #ifdef LOG_DEBUG
+          #undef LOG_DEBUG
+          #endif
+          #ifdef LOG_INFO
+          #undef LOG_INFO
+          #endif
+          #ifdef LOG_WARNING
+          #undef LOG_WARNING
+          #endif
+          #ifdef LOG_WARN
+          #undef LOG_WARN
+          #endif
+          #ifdef LOG_ERROR
+          #undef LOG_ERROR
+          #endif
+
+          #define LOG_DEBUG(...) ((void)0)
+          #define LOG_INFO(...) ((void)0)
+          #define LOG_WARNING(...) ((void)0)
+          #define LOG_WARN(...) ((void)0)
+          #define LOG_ERROR(...) ((void)0)
+          '@ | Set-Content -Encoding UTF8 "$dst\Common.h"
+
+          $cpp = Get-Content "$dst\SsrtgiPostProcessD3D12.cpp" -Raw
+          if ($cpp -notmatch '#include "\.\./pch\.h"') {
+            $cpp = "#include `"../pch.h`"`r`n" + $cpp
+          }
+          Set-Content -Encoding UTF8 "$dst\SsrtgiPostProcessD3D12.cpp" $cpp
+
+          @'
+          #pragma once
+
+          #include "../pch.h"
+
+          namespace ChimeraLighting
+          {
+              void Evaluate(uint32_t handleId,
+                            ID3D12GraphicsCommandList* cmdList,
+                            NVSDK_NGX_Parameter* params,
+                            bool depthInverted);
+
+              void Release(uint32_t handleId);
+              void Shutdown();
+          }
+          '@ | Set-Content -Encoding UTF8 "$dst\ChimeraLighting.h"
+
+          @'
+          #include "../pch.h"
+          #include "../Logger.h"
+          #include "ChimeraLighting.h"
+          #include "SsrtgiPostProcessD3D12.h"
+
+          #include "SsrtgiCopyPass_cso.h"
+          #include "SsrtgiDenoise_cso.h"
+          #include "SsrtgiGatherHZB_cso.h"
+          #include "SsrtgiHzbGenerate_cso.h"
+          #include "SsrtgiTemporal_cso.h"
+          #include "SsrtgiComposite_cso.h"
+
+          #include <memory>
+          #include <unordered_map>
+          #include <mutex>
+          #include <algorithm>
+
+          namespace
+          {
+              struct LightingContext
+              {
+                  std::unique_ptr<SsrtgiPostProcessD3D12> effect;
+                  ID3D12Device* device = nullptr;
+              };
+
+              std::unordered_map<uint32_t, LightingContext> g_contexts;
+              std::mutex g_mutex;
+              int g_mode = 1;
+              bool g_announced = false;
+
+              bool GetResource(NVSDK_NGX_Parameter* params, const char* key, ID3D12Resource** out)
+              {
+                  if (!params || !key || !out)
+                      return false;
+
+                  *out = nullptr;
+                  void* raw = nullptr;
+                  if (params->Get(key, &raw) == NVSDK_NGX_Result_Success && raw)
+                  {
+                      *out = static_cast<ID3D12Resource*>(raw);
+                      return true;
+                  }
+                  return false;
+              }
+
+              bool GetFloat(NVSDK_NGX_Parameter* params, const char* key, float& out)
+              {
+                  out = 0.0f;
+                  return params && params->Get(key, &out) == NVSDK_NGX_Result_Success;
+              }
+
+              uint32_t RaysForMode(int mode)
+              {
+                  switch (mode)
+                  {
+                      case 1: return 4;
+                      case 2: return 8;
+                      case 3: return 16;
+                      default: return 0;
+                  }
+              }
+
+              const char* ModeName(int mode)
+              {
+                  switch (mode)
+                  {
+                      case 1: return "LOW / 4 rays";
+                      case 2: return "MEDIUM / 8 rays";
+                      case 3: return "HIGH / 16 rays";
+                      default: return "OFF";
+                  }
+              }
+
+              void PollHotkey()
+              {
+                  if ((GetAsyncKeyState(VK_F10) & 1) != 0)
+                  {
+                      g_mode = (g_mode + 1) % 4;
+                      LOG_INFO("CHIMERA LIGHTING: {}", ModeName(g_mode));
+                  }
+              }
+
+              bool EnsureContext(uint32_t handleId, ID3D12Device* device)
+              {
+                  auto it = g_contexts.find(handleId);
+                  if (it != g_contexts.end())
+                  {
+                      if (it->second.device == device && it->second.effect)
+                          return true;
+                      g_contexts.erase(it);
+                  }
+
+                  LightingContext ctx {};
+                  ctx.device = device;
+                  ctx.effect = std::make_unique<SsrtgiPostProcessD3D12>();
+
+                  try
+                  {
+                      ctx.effect->Init(
+                          device,
+                          EmbeddedShaders::SsrtgiGatherHZB_cso,
+                          EmbeddedShaders::SsrtgiGatherHZB_cso_size,
+                          EmbeddedShaders::SsrtgiDenoise_cso,
+                          EmbeddedShaders::SsrtgiDenoise_cso_size,
+                          EmbeddedShaders::SsrtgiTemporal_cso,
+                          EmbeddedShaders::SsrtgiTemporal_cso_size,
+                          EmbeddedShaders::SsrtgiComposite_cso,
+                          EmbeddedShaders::SsrtgiComposite_cso_size,
+                          EmbeddedShaders::SsrtgiCopyPass_cso,
+                          EmbeddedShaders::SsrtgiCopyPass_cso_size,
+                          EmbeddedShaders::SsrtgiHzbGenerate_cso,
+                          EmbeddedShaders::SsrtgiHzbGenerate_cso_size);
+                  }
+                  catch (...)
+                  {
+                      LOG_ERROR("CHIMERA LIGHTING: SSRTGI initialization failed");
+                      return false;
+                  }
+
+                  g_contexts.emplace(handleId, std::move(ctx));
+                  LOG_INFO("CHIMERA LIGHTING: render-resolution SSRTGI initialized");
+                  return true;
+              }
+          }
+
+          namespace ChimeraLighting
+          {
+              void Evaluate(uint32_t handleId,
+                            ID3D12GraphicsCommandList* cmdList,
+                            NVSDK_NGX_Parameter* params,
+                            bool depthInverted)
+              {
+                  if (!cmdList || !params)
+                      return;
+
+                  PollHotkey();
+
+                  if (!g_announced)
+                  {
+                      g_announced = true;
+                      LOG_INFO("CHIMERA HYBRID: SSRTGI lighting path present; F10 cycles Off/Low/Medium/High");
+                  }
+
+                  if (g_mode == 0)
+                      return;
+
+                  ID3D12Resource* color = nullptr;
+                  ID3D12Resource* depth = nullptr;
+                  ID3D12Resource* motionVectors = nullptr;
+
+                  if (!GetResource(params, "Color", &color) ||
+                      !GetResource(params, "Depth", &depth) ||
+                      !GetResource(params, "MotionVectors", &motionVectors))
+                  {
+                      static uint32_t missingCount = 0;
+                      if (missingCount++ < 5)
+                          LOG_WARN("CHIMERA LIGHTING: missing Color/Depth/MotionVectors; skipping frame");
+                      return;
+                  }
+
+                  ID3D12Device* device = nullptr;
+                  if (FAILED(cmdList->GetDevice(IID_PPV_ARGS(&device))) || !device)
+                      return;
+
+                  std::scoped_lock lock(g_mutex);
+
+                  if (!EnsureContext(handleId, device))
+                  {
+                      device->Release();
+                      return;
+                  }
+
+                  auto& fx = *g_contexts[handleId].effect;
+                  SsrtgiParams& p = fx.GetParams();
+
+                  const auto desc = color->GetDesc();
+                  p.Width = static_cast<uint32_t>(desc.Width);
+                  p.Height = desc.Height;
+                  p.DepthInverted = depthInverted ? 1.0f : 0.0f;
+
+                  p.NumRays = RaysForMode(g_mode);
+                  p.RadiusPx = (g_mode == 1) ? 32.0f : 48.0f;
+                  p.FalloffEnd = (g_mode == 1) ? 24.0f : 30.0f;
+                  p.AoStrength = 0.65f;
+                  p.GiStrength = 0.90f;
+                  p.TemporalAlpha = 0.08f;
+                  p.DepthReject = 0.002f;
+
+                  float value = 0.0f;
+                  if (GetFloat(params, "sl.camerafov", value) && value > 0.01f)
+                      p.CameraFOV = value;
+                  else
+                      p.CameraFOV = 1.0471975512f;
+
+                  if (GetFloat(params, "sl.cameranear", value) && value > 0.0f)
+                      p.CameraNear = value;
+                  else
+                      p.CameraNear = 0.1f;
+
+                  if (GetFloat(params, "sl.camerafar", value) && value > p.CameraNear)
+                      p.CameraFar = value;
+                  else
+                      p.CameraFar = 1000.0f;
+
+                  p.CameraAspectRatio =
+                      (p.Height > 0) ? static_cast<float>(p.Width) / static_cast<float>(p.Height) : 1.7778f;
+
+                  if (GetFloat(params, "MV.Scale.X", value) && value != 0.0f)
+                      p.MVScaleX = value;
+                  else
+                      p.MVScaleX = 1.0f;
+
+                  if (GetFloat(params, "MV.Scale.Y", value) && value != 0.0f)
+                      p.MVScaleY = value;
+                  else
+                      p.MVScaleY = 1.0f;
+
+                  uint32_t reset = 0;
+                  if (params->Get("Reset", &reset) == NVSDK_NGX_Result_Success && reset != 0)
+                  {
+                      g_contexts.erase(handleId);
+                      device->Release();
+                      return;
+                  }
+
+                  try
+                  {
+                      fx.Execute(cmdList, color, depth, motionVectors, false);
+                  }
+                  catch (...)
+                  {
+                      LOG_ERROR("CHIMERA LIGHTING: SSRTGI Execute threw; disabling current context");
+                      g_contexts.erase(handleId);
+                  }
+
+                  device->Release();
+              }
+
+              void Release(uint32_t handleId)
+              {
+                  std::scoped_lock lock(g_mutex);
+                  g_contexts.erase(handleId);
+              }
+
+              void Shutdown()
+              {
+                  std::scoped_lock lock(g_mutex);
+                  g_contexts.clear();
+              }
+          }
+          '@ | Set-Content -Encoding UTF8 "$dst\ChimeraLighting.cpp"
+
+      - name: Patch OptiScaler pre-upscale insertion point and project
+        shell: pwsh
+        run: |
+          @'
+          from pathlib import Path
+
+          source = Path("OptiScaler/inputs/NVNGX_DLSS_Dx12.cpp")
+          text = source.read_text(encoding="utf-8")
+
+          include_anchor = '#include <hooks/D3D12_Hooks.h>\n'
+          include_new = '#include <hooks/D3D12_Hooks.h>\n#include "../chimera_ssrtgi/ChimeraLighting.h"\n'
+          if '../chimera_ssrtgi/ChimeraLighting.h' not in text:
+              if include_anchor not in text:
+                  raise RuntimeError("Could not locate D3D12 hooks include anchor")
+              text = text.replace(include_anchor, include_new, 1)
+
+          eval_anchor = '''    state.currentFeature = feature;
+
+              // Prepare upscaling inputs
+              UpscalerInputsDx12::UpscaleStart(InCmdList, InParameters, feature);
+          '''
+          eval_new = '''    state.currentFeature = feature;
+
+              // CHIMERA HYBRID: render-resolution SSRTGI before the upscaler.
+              ChimeraLighting::Evaluate(handleId, InCmdList, InParameters, feature->DepthInverted());
+
+              // Prepare upscaling inputs
+              UpscalerInputsDx12::UpscaleStart(InCmdList, InParameters, feature);
+          '''
+          if 'CHIMERA HYBRID: render-resolution SSRTGI' not in text:
+              if eval_anchor not in text:
+                  raise RuntimeError("Could not locate pre-upscale evaluation anchor")
+              text = text.replace(eval_anchor, eval_new, 1)
+
+          release_anchor = '''    auto handleId = InHandle->Id;
+
+              // Clean up framegen
+          '''
+          release_new = '''    auto handleId = InHandle->Id;
+
+              ChimeraLighting::Release(handleId);
+
+              // Clean up framegen
+          '''
+          if 'ChimeraLighting::Release(handleId);' not in text:
+              if release_anchor not in text:
+                  raise RuntimeError("Could not locate release anchor")
+              text = text.replace(release_anchor, release_new, 1)
+
+          source.write_text(text, encoding="utf-8")
+
+          project = Path("OptiScaler/OptiScaler.vcxproj")
+          proj = project.read_text(encoding="utf-8-sig")
+
+          compile_anchor = '    <ClCompile Include="Config.cpp" />'
+          compile_new = '''    <ClCompile Include="chimera_ssrtgi\\ChimeraLighting.cpp" />
+              <ClCompile Include="chimera_ssrtgi\\SsrtgiPostProcessD3D12.cpp" />
+              <ClCompile Include="Config.cpp" />'''
+          if 'chimera_ssrtgi\\ChimeraLighting.cpp' not in proj:
+              if compile_anchor not in proj:
+                  raise RuntimeError("Could not locate vcxproj compile anchor")
+              proj = proj.replace(compile_anchor, compile_new, 1)
+
+          header_anchor = '    <ClInclude Include="upscalers\\IFeature_Dx11wDx12.h" />'
+          header_new = '''    <ClInclude Include="chimera_ssrtgi\\ChimeraLighting.h" />
+              <ClInclude Include="chimera_ssrtgi\\SsrtgiPostProcessD3D12.h" />
+              <ClInclude Include="upscalers\\IFeature_Dx11wDx12.h" />'''
+          if 'chimera_ssrtgi\\ChimeraLighting.h' not in proj:
+              if header_anchor not in proj:
+                  raise RuntimeError("Could not locate vcxproj header anchor")
+              proj = proj.replace(header_anchor, header_new, 1)
+
+          project.write_text(proj, encoding="utf-8-sig")
+          print("CHIMERA HYBRID SSRTGI PATCH APPLIED")
+          '@ | Set-Content -Encoding UTF8 apply_chimera_hybrid.py
+
+          python apply_chimera_hybrid.py
+
+      - name: Verify hybrid source integration
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Select-String -Path OptiScaler\inputs\NVNGX_DLSS_Dx12.cpp -Pattern "ChimeraLighting::Evaluate"
+          Select-String -Path OptiScaler\chimera_ssrtgi\ChimeraLighting.cpp -Pattern "F10 cycles Off/Low/Medium/High"
+          Select-String -Path OptiScaler\OptiScaler.vcxproj -Pattern "chimera_ssrtgi"
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build Chimera Lighting OptiScaler
+        shell: pwsh
+        run: |
+          msbuild /m /p:Configuration=Release . /verbosity:minimal
+
+      - name: Verify built payload contains Chimera lighting marker
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $dlls = Get-ChildItem "${{ github.workspace }}\x64\Release\a" -Recurse -File |
+            Where-Object { $_.Extension -eq ".dll" }
+          if (-not $dlls) { throw "No built DLLs found in x64\Release\a" }
+
+          $found = $false
+          foreach ($dll in $dlls) {
+            $bytes = [System.IO.File]::ReadAllBytes($dll.FullName)
+            $ascii = [System.Text.Encoding]::ASCII.GetString($bytes)
+            if ($ascii.Contains("CHIMERA HYBRID")) {
+              Write-Host "Found Chimera marker in $($dll.FullName)"
+              $found = $true
+              break
+            }
+          }
+          if (-not $found) { throw "Compiled payload does not contain CHIMERA HYBRID marker" }
+
+      - name: Package Chimera Hybrid Lighting
+        shell: pwsh
+        run: |
+          $out = "${{ github.workspace }}\Chimera_Hybrid_Phase1_SSRTGI_OptiScaler.7z"
+          7z a -r $out "${{ github.workspace }}\x64\Release\a\*.*"
+          if (-not (Test-Path $out)) { throw "Hybrid package not created" }
+
+      - name: Upload Chimera Hybrid lighting artifact
+        uses: actions/upload-artifact@v7.0.0
+        with:
+          name: Chimera-Hybrid-Phase1-SSRTGI-OptiScaler
+          path: ${{ github.workspace }}\Chimera_Hybrid_Phase1_SSRTGI_OptiScaler.7z
+          archive: false
+          compression-level: 0
+          if-no-files-found: error
