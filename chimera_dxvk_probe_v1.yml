@@ -1,0 +1,583 @@
+name: Chimera DXVK Renderer Probe v1
+
+on:
+  push:
+    branches:
+      - chimera-amd-nr
+    paths:
+      - '.github/workflows/chimera_dxvk_probe_v1.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-dxvk:
+    name: Build patched DXVK depth probe
+    runs-on: ubuntu-latest
+    container: archlinux/archlinux:base-devel
+    steps:
+      - name: Install build dependencies
+        run: pacman -Syu --needed --noconfirm git meson mingw-w64-gcc glslang python
+
+      - name: Clone pinned DXVK
+        run: |
+          git clone https://github.com/doitsujin/dxvk.git dxvk
+          cd dxvk
+          git checkout d7ac2580aa274a14a500e74edbe4ec6aae250e4a
+          git submodule update --init --recursive
+
+      - name: Add Chimera DXVK depth probe
+        working-directory: dxvk
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path('src/d3d11/d3d11_context.cpp')
+          s = p.read_text(encoding='utf-8')
+
+          marker = 'CHIMERA_DXVK_PROBE_V1'
+          if marker in s:
+              raise SystemExit('Probe already present unexpectedly')
+
+          include_anchor = '#include "d3d11_context.h"\n'
+          includes = '''#include "d3d11_context.h"\n\n#include <algorithm>\n#include <chrono>\n#include <filesystem>\n#include <fstream>\n#include <mutex>\n#include <vector>\n#include <windows.h>\n'''
+          if include_anchor not in s:
+              raise SystemExit('Could not locate d3d11_context.h include')
+          s = s.replace(include_anchor, includes, 1)
+
+          ns_anchor = 'namespace dxvk {\n'
+          helper = r'''
+          namespace {
+
+            static const char* g_chimeraProbeMarker = "CHIMERA_DXVK_PROBE_V1";
+
+            struct ChimeraDepthCandidate {
+              uint32_t width = 0;
+              uint32_t height = 0;
+              uint32_t vkFormat = 0;
+              uint32_t dxgiFormat = 0;
+              uint32_t samples = 0;
+              uint64_t binds = 0;
+            };
+
+            std::mutex g_chimeraProbeMutex;
+            std::vector<ChimeraDepthCandidate> g_chimeraDepthCandidates;
+            auto g_chimeraLastWrite = std::chrono::steady_clock::now() - std::chrono::seconds(2);
+
+            std::filesystem::path chimeraProbePath() {
+              wchar_t path[MAX_PATH] = { };
+              DWORD len = GetModuleFileNameW(nullptr, path, MAX_PATH);
+              if (!len || len >= MAX_PATH)
+                return std::filesystem::path(L"chimera_dxvk_probe.txt");
+              return std::filesystem::path(path).parent_path() / L"chimera_dxvk_probe.txt";
+            }
+
+            void chimeraWriteProbeLocked() {
+              auto now = std::chrono::steady_clock::now();
+              if (now - g_chimeraLastWrite < std::chrono::milliseconds(250))
+                return;
+              g_chimeraLastWrite = now;
+
+              auto candidates = g_chimeraDepthCandidates;
+              std::sort(candidates.begin(), candidates.end(), [] (const auto& a, const auto& b) {
+                if (a.binds != b.binds)
+                  return a.binds > b.binds;
+                uint64_t areaA = uint64_t(a.width) * uint64_t(a.height);
+                uint64_t areaB = uint64_t(b.width) * uint64_t(b.height);
+                return areaA > areaB;
+              });
+
+              std::ofstream file(chimeraProbePath(), std::ios::trunc);
+              if (!file)
+                return;
+
+              file << "marker=" << g_chimeraProbeMarker << "\\n";
+              file << "runtime=1\\n";
+              file << "depth=" << (!candidates.empty() ? 1 : 0) << "\\n";
+              file << "candidate_count=" << candidates.size() << "\\n";
+
+              size_t limit = std::min<size_t>(candidates.size(), 8u);
+              for (size_t i = 0; i < limit; i++) {
+                const auto& c = candidates[i];
+                file << "candidate" << i << "="
+                     << c.width << "x" << c.height
+                     << ",vk=" << c.vkFormat
+                     << ",dxgi=" << c.dxgiFormat
+                     << ",samples=" << c.samples
+                     << ",binds=" << c.binds << "\\n";
+              }
+            }
+
+            void chimeraProbeDepth(D3D11DepthStencilView* dsv) {
+              if (!dsv)
+                return;
+
+              auto view = dsv->GetImageView();
+              if (!view || !view->image())
+                return;
+
+              const auto& info = view->image()->info();
+              uint32_t width = info.extent.width;
+              uint32_t height = info.extent.height;
+              if (width < 64 || height < 64)
+                return;
+
+              ChimeraDepthCandidate key;
+              key.width = width;
+              key.height = height;
+              key.vkFormat = uint32_t(info.format);
+              key.dxgiFormat = uint32_t(dsv->GetViewFormat());
+              key.samples = uint32_t(info.sampleCount);
+
+              std::lock_guard<std::mutex> lock(g_chimeraProbeMutex);
+              auto it = std::find_if(g_chimeraDepthCandidates.begin(), g_chimeraDepthCandidates.end(),
+                [&] (const ChimeraDepthCandidate& c) {
+                  return c.width == key.width
+                      && c.height == key.height
+                      && c.vkFormat == key.vkFormat
+                      && c.dxgiFormat == key.dxgiFormat
+                      && c.samples == key.samples;
+                });
+
+              if (it == g_chimeraDepthCandidates.end()) {
+                key.binds = 1;
+                g_chimeraDepthCandidates.push_back(key);
+              } else {
+                it->binds += 1;
+              }
+
+              chimeraWriteProbeLocked();
+            }
+
+          }
+          '''
+          if ns_anchor not in s:
+              raise SystemExit('Could not locate namespace dxvk')
+          s = s.replace(ns_anchor, ns_anchor + helper, 1)
+
+          pattern = re.compile(
+              r'(void STDMETHODCALLTYPE D3D11CommonContext<ContextType>::OMSetRenderTargets\(\s*'
+              r'UINT\s+NumViews,\s*'
+              r'ID3D11RenderTargetView\* const\*\s+ppRenderTargetViews,\s*'
+              r'ID3D11DepthStencilView\*\s+pDepthStencilView\) \{)'
+          )
+          m = pattern.search(s)
+          if not m:
+              raise SystemExit('Could not locate OMSetRenderTargets implementation')
+
+          replacement = m.group(1) + '''\n    if (pDepthStencilView)\n      chimeraProbeDepth(static_cast<D3D11DepthStencilView*>(pDepthStencilView));'''
+          s = s[:m.start()] + replacement + s[m.end():]
+
+          p.write_text(s, encoding='utf-8')
+          print('Patched', p)
+          print('Marker occurrences:', s.count(marker))
+          PY
+
+          grep -n 'CHIMERA_DXVK_PROBE_V1' src/d3d11/d3d11_context.cpp
+          grep -n 'chimeraProbeDepth' src/d3d11/d3d11_context.cpp
+
+      - name: Build DXVK x64 and x32
+        working-directory: dxvk
+        run: |
+          export VERSION_NAME="chimera-dxvk-probe-v1"
+          ./package-release.sh "$VERSION_NAME" build --no-package
+
+      - name: Verify DXVK outputs
+        working-directory: dxvk
+        run: |
+          set -euxo pipefail
+          root="build/dxvk-chimera-dxvk-probe-v1"
+          test -f "$root/x64/d3d11.dll"
+          test -f "$root/x64/dxgi.dll"
+          test -f "$root/x32/d3d11.dll"
+          test -f "$root/x32/dxgi.dll"
+          strings "$root/x64/d3d11.dll" | grep -q CHIMERA_DXVK_PROBE_V1
+          mkdir -p ../runtime_bundle
+          cp "$root/x64/d3d11.dll" ../runtime_bundle/d3d11_64.dll
+          cp "$root/x64/dxgi.dll"  ../runtime_bundle/dxgi_64.dll
+          cp "$root/x32/d3d11.dll" ../runtime_bundle/d3d11_32.dll
+          cp "$root/x32/dxgi.dll"  ../runtime_bundle/dxgi_32.dll
+          cp LICENSE ../runtime_bundle/DXVK-LICENSE
+          ls -lh ../runtime_bundle
+
+      - name: Upload DXVK runtime bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: chimera-dxvk-probe-runtime
+          path: runtime_bundle
+          compression-level: 0
+          if-no-files-found: error
+
+  build-decky:
+    name: Build Chimera DXVK Probe Decky plugin
+    needs: build-dxvk
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone proven Decky injector base
+        run: |
+          git clone https://github.com/xXJSONDeruloXx/decky-dlss-enabler.git plugin
+          cd plugin
+          git checkout d022d946425e8d2bd98785ed8c87584d0578a0b4
+
+      - name: Download patched DXVK runtime
+        uses: actions/download-artifact@v8
+        with:
+          name: chimera-dxvk-probe-runtime
+          path: plugin/bin
+
+      - name: Convert backend/frontend to Chimera DXVK Probe
+        working-directory: plugin
+        shell: bash
+        run: |
+          cat > plugin.json <<'EOF'
+          {
+            "name": "Chimera Lighting",
+            "author": "Chimera project",
+            "flags": [],
+            "api_version": 1,
+            "publish": {
+              "tags": ["graphics", "proton", "dxvk", "games"],
+              "description": "Renderer-side DXVK depth probe for Chimera Lighting."
+            }
+          }
+          EOF
+
+          python3 - <<'PY'
+          import json
+          p='package.json'
+          data=json.load(open(p))
+          data['name']='chimera-lighting-decky'
+          data['version']='0.4.0'
+          data['description']='Chimera Lighting DXVK renderer depth probe'
+          data.pop('remote_binary_bundling',None)
+          data.pop('remote_binary',None)
+          with open(p,'w') as f:
+              json.dump(data,f,indent=2)
+              f.write('\n')
+          PY
+
+          cat >> main.py <<'PY'
+
+          # ================= CHIMERA DXVK PROBE OVERRIDES =================
+          CHIMERA_DXVK_MARKER = ".chimera_dxvk_probe.json"
+          CHIMERA_LEGACY_MARKER = ".chimera_lighting.json"
+
+          def _chimera_pe_bits(path: Path | None):
+              if not path or not path.exists():
+                  return 64
+              data = path.read_bytes()
+              if len(data) < 0x100 or data[:2] != b"MZ":
+                  return 64
+              pe = struct.unpack_from("<I", data, 0x3C)[0]
+              if pe + 24 >= len(data) or data[pe:pe+4] != b"PE\\0\\0":
+                  return 64
+              machine = struct.unpack_from("<H", data, pe + 4)[0]
+              return 64 if machine in (0x8664, 0xAA64) else 32
+
+          def _chimera_merge_dxvk_override(options: str):
+              options = str(options or "").strip()
+              wanted = ["d3d11=n,b", "dxgi=n,b"]
+              m = re.search(r'WINEDLLOVERRIDES=([^\\s]+)', options)
+              if m:
+                  current = [x for x in m.group(1).split(';') if x]
+                  current = [x for x in current if not x.lower().startswith('d3d11=') and not x.lower().startswith('dxgi=')]
+                  merged = ';'.join(wanted + current)
+                  return options[:m.start(1)] + merged + options[m.end(1):]
+              return ("WINEDLLOVERRIDES=" + ';'.join(wanted) + " " + options).strip()
+
+          def _chimera_cleanup_legacy(target_dir: Path):
+              legacy = target_dir / CHIMERA_LEGACY_MARKER
+              if not legacy.exists():
+                  return
+              try:
+                  marker = json.loads(legacy.read_text(encoding='utf-8'))
+              except Exception:
+                  marker = {}
+              proxy = marker.get('proxy', 'dxgi')
+              proxy_path = target_dir / f"{proxy}.dll"
+              backup = target_dir / f"{proxy}.dll.chimera_backup"
+              try:
+                  if proxy_path.exists(): proxy_path.unlink()
+                  if backup.exists(): shutil.move(str(backup), str(proxy_path))
+              except Exception as exc:
+                  decky.logger.warning(f"[Chimera DXVK] legacy proxy cleanup: {exc}")
+              for name in ('ReShade.ini','ChimeraPreset.ini','chimera_mode.txt','chimera_status.txt','chimera_bridge.addon32','chimera_bridge.addon64'):
+                  p = target_dir / name
+                  try:
+                      if p.exists(): p.unlink()
+                  except Exception: pass
+              for shader_name in ('ChimeraLighting.fx','ReShade.fxh'):
+                  p = target_dir / 'reshade-shaders' / 'Shaders' / shader_name
+                  try:
+                      if p.exists(): p.unlink()
+                  except Exception: pass
+              try: legacy.unlink()
+              except Exception: pass
+
+          def _chimera_restore_dxvk(target_dir: Path):
+              for name in ('d3d11','dxgi'):
+                  dll = target_dir / f'{name}.dll'
+                  backup = target_dir / f'{name}.dll.chimera_dxvk_backup'
+                  try:
+                      if dll.exists(): dll.unlink()
+                      if backup.exists(): shutil.move(str(backup), str(dll))
+                  except Exception as exc:
+                      decky.logger.warning(f"[Chimera DXVK] restore {name}: {exc}")
+
+          async def _chimera_dxvk_enable(self, appid: str, current_launch_options: str = "", api_override: str = "auto") -> dict:
+              try:
+                  game_info = self._game_record(str(appid))
+                  if not game_info:
+                      return {"status":"error", "message":"Game installation was not found."}
+                  target_dir, target_exe = self._guess_patch_target(game_info)
+                  target_dir.mkdir(parents=True, exist_ok=True)
+                  _chimera_cleanup_legacy(target_dir)
+                  _chimera_restore_dxvk(target_dir)
+
+                  bits = _chimera_pe_bits(target_exe)
+                  for name in ('d3d11','dxgi'):
+                      dst = target_dir / f'{name}.dll'
+                      backup = target_dir / f'{name}.dll.chimera_dxvk_backup'
+                      if dst.exists() and not backup.exists():
+                          shutil.copy2(dst, backup)
+                      src = self._plugin_bin_dir() / f'{name}_{bits}.dll'
+                      if not src.exists():
+                          raise FileNotFoundError(f'Missing bundled {bits}-bit {name}.dll')
+                      shutil.copy2(src, dst)
+
+                  probe = target_dir / 'chimera_dxvk_probe.txt'
+                  if probe.exists(): probe.unlink()
+                  launch = _chimera_merge_dxvk_override(current_launch_options)
+                  marker = {
+                      'backend':'dxvk-probe-v1','appid':str(appid),'name':game_info.get('name',''),
+                      'bits':bits,'target_dir':str(target_dir),'target_exe':str(target_exe or ''),
+                      'original_launch_options':current_launch_options,'managed_launch_options':launch,
+                  }
+                  (target_dir / CHIMERA_DXVK_MARKER).write_text(json.dumps(marker,indent=2),encoding='utf-8')
+                  return {"status":"success","enabled":True,"bits":bits,"launch_options":launch,"restart_required":True,"name":game_info.get('name','')}
+              except Exception as exc:
+                  decky.logger.error(f"[Chimera DXVK] enable failed: {exc}")
+                  return {"status":"error", "message":str(exc)}
+
+          async def _chimera_dxvk_disable(self, appid: str) -> dict:
+              try:
+                  game_info = self._game_record(str(appid))
+                  if not game_info:
+                      return {"status":"error", "message":"Game installation was not found."}
+                  target_dir, _ = self._guess_patch_target(game_info)
+                  marker_path = target_dir / CHIMERA_DXVK_MARKER
+                  marker = json.loads(marker_path.read_text(encoding='utf-8')) if marker_path.exists() else {}
+                  _chimera_cleanup_legacy(target_dir)
+                  _chimera_restore_dxvk(target_dir)
+                  probe = target_dir / 'chimera_dxvk_probe.txt'
+                  if probe.exists(): probe.unlink()
+                  if marker_path.exists(): marker_path.unlink()
+                  return {"status":"success","enabled":False,"launch_options":marker.get('original_launch_options','')}
+              except Exception as exc:
+                  return {"status":"error", "message":str(exc)}
+
+          async def _chimera_dxvk_status(self, appid: str) -> dict:
+              try:
+                  game_info = self._game_record(str(appid))
+                  if not game_info:
+                      return {"status":"error", "message":"Game not found."}
+                  target_dir, target_exe = self._guess_patch_target(game_info)
+                  marker_path = target_dir / CHIMERA_DXVK_MARKER
+                  legacy_path = target_dir / CHIMERA_LEGACY_MARKER
+                  enabled = marker_path.exists()
+                  legacy = legacy_path.exists() and not enabled
+                  marker = json.loads(marker_path.read_text(encoding='utf-8')) if enabled else {}
+                  runtime = False
+                  depth = False
+                  candidates = []
+                  probe = target_dir / 'chimera_dxvk_probe.txt'
+                  if probe.exists():
+                      try:
+                          import time
+                          age = time.time() - probe.stat().st_mtime
+                          lines = probe.read_text(encoding='utf-8',errors='ignore').splitlines()
+                          vals = dict(line.split('=',1) for line in lines if '=' in line and not line.startswith('candidate'))
+                          runtime = age < 3.0 and vals.get('marker') == 'CHIMERA_DXVK_PROBE_V1' and vals.get('runtime') == '1'
+                          depth = runtime and vals.get('depth') == '1'
+                          for line in lines:
+                              if line.startswith('candidate') and '=' in line:
+                                  candidates.append(line.split('=',1)[1])
+                      except Exception as exc:
+                          decky.logger.warning(f"[Chimera DXVK] probe parse: {exc}")
+                  return {"status":"success","enabled":enabled,"legacy":legacy,"runtime_active":runtime,"depth_ready":depth,
+                          "candidates":candidates[:5],"bits":marker.get('bits'),"backend":marker.get('backend','legacy-reshade' if legacy else ''),
+                          "name":game_info.get('name',''),"target_exe":str(target_exe or '')}
+              except Exception as exc:
+                  return {"status":"error", "message":str(exc)}
+
+          async def _chimera_noop_mode(self, appid: str, mode: int) -> dict:
+              return {"status":"success", "mode":0}
+
+          Plugin.enable_game = _chimera_dxvk_enable
+          Plugin.disable_game = _chimera_dxvk_disable
+          Plugin.chimera_status = _chimera_dxvk_status
+          Plugin.set_mode = _chimera_noop_mode
+          PY
+
+          cat > src/index.tsx <<'EOF'
+          import { Field, PanelSection, PanelSectionRow, Router, ToggleField, DropdownItem } from "@decky/ui";
+          import { callable, definePlugin, toaster } from "@decky/api";
+          import { useCallback, useEffect, useMemo, useState } from "react";
+          import { FaMicrochip } from "react-icons/fa";
+
+          type Game = { appid: string; name: string };
+          type ListResponse = { status: string; games: Game[]; message?: string };
+          type Status = { status: string; enabled?: boolean; legacy?: boolean; runtime_active?: boolean; depth_ready?: boolean; candidates?: string[]; name?: string; bits?: number; backend?: string; message?: string };
+          type EnableResult = { status: string; launch_options?: string; restart_required?: boolean; message?: string };
+
+          const listGames = callable<[], ListResponse>("list_installed_games");
+          const getStatus = callable<[appid: string], Status>("chimera_status");
+          const enableGame = callable<[appid: string, launch: string, api: string], EnableResult>("enable_game");
+          const disableGame = callable<[appid: string], EnableResult>("disable_game");
+
+          const getLaunchOptions = (appid: number): Promise<string> => new Promise((resolve) => {
+            let unregister = () => undefined;
+            const reg = SteamClient.Apps.RegisterForAppDetails(appid, (details: { strLaunchOptions?: string }) => {
+              unregister(); resolve(details?.strLaunchOptions ?? "");
+            });
+            unregister = reg.unregister;
+            window.setTimeout(() => { unregister(); resolve(""); }, 4000);
+          });
+
+          function Content() {
+            const [games, setGames] = useState<Game[]>([]);
+            const [selected, setSelected] = useState<string>("");
+            const [status, setStatus] = useState<Status | null>(null);
+            const [busy, setBusy] = useState(false);
+            const runningId = String(Router.MainRunningApp?.appid ?? "");
+            const runningName = Router.MainRunningApp?.display_name ?? "";
+
+            const refresh = useCallback(async (id?: string) => {
+              const target = id ?? selected;
+              if (!target) return;
+              setStatus(await getStatus(target));
+            }, [selected]);
+
+            useEffect(() => {
+              (async () => {
+                const r = await listGames();
+                if (r.status === "success") {
+                  setGames(r.games);
+                  const preferred = runningId && r.games.some(g => g.appid === runningId) ? runningId : (r.games[0]?.appid ?? "");
+                  setSelected(preferred);
+                }
+              })();
+            }, []);
+
+            useEffect(() => {
+              if (runningId && games.some(g => g.appid === runningId) && runningId !== selected) setSelected(runningId);
+            }, [runningId, games]);
+
+            useEffect(() => {
+              if (!selected) return;
+              void refresh(selected);
+              const t = window.setInterval(() => void refresh(selected), 1000);
+              return () => window.clearInterval(t);
+            }, [selected, refresh]);
+
+            const selectedGame = useMemo(() => games.find(g => g.appid === selected), [games, selected]);
+            const candidates = status?.candidates ?? [];
+
+            const toggleEnabled = async (enabled: boolean) => {
+              if (!selected || busy) return;
+              setBusy(true);
+              try {
+                if (enabled) {
+                  const old = await getLaunchOptions(Number(selected));
+                  const r = await enableGame(selected, old, "dx11");
+                  if (r.status !== "success") throw new Error(r.message || "Enable failed");
+                  if (r.launch_options !== undefined) SteamClient.Apps.SetAppLaunchOptions(Number(selected), r.launch_options);
+                  toaster.toast({ title:"Chimera DXVK Probe", body:"DXVK probe installed. Start/restart the game once." });
+                } else {
+                  const r = await disableGame(selected);
+                  if (r.status !== "success") throw new Error(r.message || "Disable failed");
+                  if (r.launch_options !== undefined) SteamClient.Apps.SetAppLaunchOptions(Number(selected), r.launch_options);
+                  toaster.toast({ title:"Chimera DXVK Probe", body:"Original renderer files restored." });
+                }
+                await refresh(selected);
+              } catch (e) {
+                toaster.toast({ title:"Chimera DXVK Probe", body:e instanceof Error ? e.message : String(e) });
+              } finally { setBusy(false); }
+            };
+
+            return <>
+              <PanelSection title="Current game">
+                <PanelSectionRow><Field label={runningId === selected && runningName ? runningName : (selectedGame?.name || "No game selected")} description={runningId === selected ? "Running now" : "Fallback selection"} /></PanelSectionRow>
+                {runningId !== selected && <PanelSectionRow><DropdownItem label="Game" rgOptions={games.map(g => ({data:g.appid,label:g.name}))} selectedOption={selected} onChange={(o:any)=>setSelected(String(o.data))} /></PanelSectionRow>}
+                <PanelSectionRow><ToggleField label="Enable DXVK renderer probe" checked={!!status?.enabled} disabled={busy || !selected} onChange={toggleEnabled} /></PanelSectionRow>
+                {status?.legacy && <PanelSectionRow><Field label="Migration" description="Legacy ReShade Chimera detected. Enabling this probe removes it automatically." /></PanelSectionRow>}
+              </PanelSection>
+
+              <PanelSection title="Renderer probe">
+                <PanelSectionRow><Field label="Backend" description={status?.enabled ? `DXVK probe · ${status?.bits ?? "?"}-bit` : "Not installed"} /></PanelSectionRow>
+                <PanelSectionRow><Field label="Runtime" description={status?.runtime_active ? "✓ Patched DXVK active" : (status?.enabled ? "Waiting for game" : "Not installed")} /></PanelSectionRow>
+                <PanelSectionRow><Field label="Depth attachments" description={status?.runtime_active ? (status?.depth_ready ? `✓ ${candidates.length} candidate(s)` : "⚠ None observed") : "Waiting for renderer"} /></PanelSectionRow>
+                {candidates.slice(0,5).map((c,i)=><PanelSectionRow key={i}><Field label={`Depth ${i+1}`} description={c} /></PanelSectionRow>)}
+              </PanelSection>
+
+              <PanelSection title="About this build">
+                <PanelSectionRow><Field label="Stage" description="DX11 renderer diagnostics only — no lighting effect yet" /></PanelSectionRow>
+                <PanelSectionRow><Field label="Next" description="Use the real main scene depth attachment for raw Depth → Normals → GI-hit debug stages." /></PanelSectionRow>
+              </PanelSection>
+            </>;
+          }
+
+          export default definePlugin(() => ({ name:"Chimera Lighting", titleView:<div className="Title">Chimera DXVK Probe</div>, content:<Content />, icon:<FaMicrochip /> }));
+          EOF
+
+      - name: Build Decky frontend
+        working-directory: plugin
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.18.1 --activate
+          pnpm install --frozen-lockfile || pnpm install --no-frozen-lockfile
+          pnpm run build
+
+      - name: Assemble validated Decky ZIP
+        working-directory: plugin
+        run: |
+          set -euxo pipefail
+          rm -rf package
+          mkdir -p package/ChimeraLighting/bin package/ChimeraLighting/dist
+          cp plugin.json package.json main.py package/ChimeraLighting/
+          cp dist/index.js package/ChimeraLighting/dist/index.js
+          cp bin/d3d11_64.dll bin/dxgi_64.dll bin/d3d11_32.dll bin/dxgi_32.dll package/ChimeraLighting/bin/
+          cp bin/DXVK-LICENSE package/ChimeraLighting/DXVK-LICENSE
+          cp LICENSE package/ChimeraLighting/DeckyBase-LICENSE.txt
+          (cd package && python3 -m zipfile -c ../Chimera-DXVK-Probe-v1.zip ChimeraLighting)
+
+          python3 - <<'PY'
+          import zipfile, json
+          z=zipfile.ZipFile('Chimera-DXVK-Probe-v1.zip')
+          names=set(z.namelist())
+          required={
+            'ChimeraLighting/plugin.json','ChimeraLighting/package.json','ChimeraLighting/main.py',
+            'ChimeraLighting/dist/index.js','ChimeraLighting/bin/d3d11_64.dll','ChimeraLighting/bin/dxgi_64.dll',
+            'ChimeraLighting/bin/d3d11_32.dll','ChimeraLighting/bin/dxgi_32.dll'
+          }
+          missing=required-names
+          if missing: raise SystemExit(f'Missing package files: {missing}')
+          meta=json.loads(z.read('ChimeraLighting/plugin.json'))
+          if meta.get('api_version') != 1: raise SystemExit('api_version invalid')
+          pkg=json.loads(z.read('ChimeraLighting/package.json'))
+          if pkg.get('version') != '0.4.0': raise SystemExit('version invalid')
+          print('Decky ZIP contract: PASS')
+          PY
+          test $(stat -c%s Chimera-DXVK-Probe-v1.zip) -gt 1000000
+          sha256sum Chimera-DXVK-Probe-v1.zip
+
+      - name: Upload Chimera DXVK Probe plugin
+        uses: actions/upload-artifact@v7
+        with:
+          name: Chimera-DXVK-Probe-v1
+          path: plugin/Chimera-DXVK-Probe-v1.zip
+          compression-level: 0
+          if-no-files-found: error
