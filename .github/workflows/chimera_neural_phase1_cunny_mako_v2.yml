@@ -1,0 +1,1055 @@
+name: Chimera Neural Phase 1 - CuNNy MAKO v2
+
+on:
+  push:
+    branches:
+      - chimera-amd-nr
+    paths:
+      - '.github/workflows/chimera_neural_phase1_cunny_mako_v2.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout build host
+        uses: actions/checkout@v6
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git curl python3 \
+            llvm clang clang-tools clang-tidy \
+            cmake ninja-build pkg-config g++-multilib ccache \
+            libvulkan-dev libx11-dev mesa-common-dev \
+            qt6-base-dev qt6-base-dev-tools \
+            qt6-tools-dev qt6-tools-dev-tools \
+            qt6-declarative-dev qt6-declarative-dev-tools \
+            glslang-tools spirv-tools zip unzip xz-utils jq patchelf rsync file
+
+          git clone --depth=1 -b vulkan-sdk-1.4.328 \
+            https://github.com/KhronosGroup/Vulkan-Headers /tmp/vkh
+          sudo rm -rf /usr/include/vulkan /usr/include/vk_video
+          sudo cp -a /tmp/vkh/include/vulkan /tmp/vkh/include/vk_video /usr/include/
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Enable pnpm
+        shell: bash
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.17.0 --activate
+          pnpm --version
+
+      - name: Clone pinned MAKO and CuNNy
+        shell: bash
+        run: |
+          git clone https://github.com/eugeniosegala/MAKO.git MAKO
+          git -C MAKO checkout 94df0249049715013081fc11e83aa9f05059a6c8
+
+          git clone https://github.com/funnyplanter/CuNNy.git CuNNy
+          git -C CuNNy checkout 906031bb00c15dd6a6bbbaa21c0eb0b724ca8437
+
+          echo "MAKO:  $(git -C MAKO rev-parse HEAD)"
+          echo "CuNNy: $(git -C CuNNy rev-parse HEAD)"
+
+      - name: Patch real Chimera neural pipeline
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          
+          from pathlib import Path
+          import re
+          import subprocess
+          
+          ROOT = Path("MAKO")
+          CUNNY = Path("CuNNy")
+          ENGINE = ROOT / "engine"
+          PLUGIN = ROOT / "plugin"
+          
+          def replace_once(path: Path, old: str, new: str, label: str):
+              text = path.read_text(encoding="utf-8")
+              if old not in text:
+                  raise SystemExit(f"{label}: patch anchor not found in {path}")
+              path.write_text(text.replace(old, new, 1), encoding="utf-8")
+              print(f"patched {label}: {path}")
+          
+          # 1) Renderer/config identity: add a fifth live scaling method.
+          config_hpp = ENGINE / "mako-common/include/mako-common/configuration/config.hpp"
+          replace_once(
+              config_hpp,
+              '''        /// MAKO's open, single-pass edge-adaptive scaler.
+                  Mako,
+                  /// Lossless Scaling's multi-pass LS1 neural model.
+                  Ls1,''',
+              '''        /// MAKO's open, single-pass edge-adaptive scaler.
+                  Mako,
+                  /// Chimera's learned residual CNN, evaluated after MAKO reconstruction.
+                  Chimera,
+                  /// Lossless Scaling's multi-pass LS1 neural model.
+                  Ls1,''',
+              "ScalingMethod enum",
+          )
+          replace_once(
+              config_hpp,
+              '''            case ScalingMethod::Mako:
+                          return "mako";
+                      case ScalingMethod::Ls1:''',
+              '''            case ScalingMethod::Mako:
+                          return "mako";
+                      case ScalingMethod::Chimera:
+                          return "chimera";
+                      case ScalingMethod::Ls1:''',
+              "ScalingMethod name",
+          )
+          replace_once(
+              config_hpp,
+              '''        if (value == "mako")
+                      return ScalingMethod::Mako;
+                  if (value == "ls1")''',
+              '''        if (value == "mako")
+                      return ScalingMethod::Mako;
+                  if (value == "chimera")
+                      return ScalingMethod::Chimera;
+                  if (value == "ls1")''',
+              "ScalingMethod parser",
+          )
+          
+          shared = PLUGIN / "shared_config.py"
+          replace_once(
+              shared,
+              '''SCALING_METHOD_MAKO = "mako"
+          SCALING_METHOD_LS1 = "ls1"''',
+              '''SCALING_METHOD_MAKO = "mako"
+          SCALING_METHOD_CHIMERA = "chimera"
+          SCALING_METHOD_LS1 = "ls1"''',
+              "Decky scaling constant",
+          )
+          replace_once(
+              shared,
+              '''    SCALING_METHOD_NATIVE,
+              SCALING_METHOD_MAKO,
+              SCALING_METHOD_LS1,''',
+              '''    SCALING_METHOD_NATIVE,
+              SCALING_METHOD_MAKO,
+              SCALING_METHOD_CHIMERA,
+              SCALING_METHOD_LS1,''',
+              "Decky scaling values",
+          )
+          replace_once(
+              shared,
+              '''"description": "live spatial selection inside a provisioned engine: Native Resolution, MAKO Scaler, LS1 Quality, or LS1 Performance",''',
+              '''"description": "live spatial selection inside a provisioned engine: Native Resolution, MAKO Scaler, Chimera Neural, LS1 Quality, or LS1 Performance",''',
+              "Decky scaling description",
+          )
+          
+          gen_ts = PLUGIN / "scripts/generate_ts_schema.py"
+          replace_once(
+              gen_ts,
+              '''    SCALING_METHOD_LS1_PERFORMANCE,
+              SCALING_METHOD_MAKO,
+              SCALING_METHOD_NATIVE,''',
+              '''    SCALING_METHOD_LS1_PERFORMANCE,
+              SCALING_METHOD_MAKO,
+              SCALING_METHOD_CHIMERA,
+              SCALING_METHOD_NATIVE,''',
+              "TS generator import",
+          )
+          replace_once(
+              gen_ts,
+              '''        f'export const SCALING_METHOD_MAKO = "{SCALING_METHOD_MAKO}" as const;',
+                  f'export const SCALING_METHOD_LS1 = "{SCALING_METHOD_LS1}" as const;',''',
+              '''        f'export const SCALING_METHOD_MAKO = "{SCALING_METHOD_MAKO}" as const;',
+                  f'export const SCALING_METHOD_CHIMERA = "{SCALING_METHOD_CHIMERA}" as const;',
+                  f'export const SCALING_METHOD_LS1 = "{SCALING_METHOD_LS1}" as const;',''',
+              "TS generator constant",
+          )
+          replace_once(
+              gen_ts,
+              '''        "  SCALING_METHOD_NATIVE,",
+                  "  SCALING_METHOD_MAKO,",
+                  "  SCALING_METHOD_LS1,",''',
+              '''        "  SCALING_METHOD_NATIVE,",
+                  "  SCALING_METHOD_MAKO,",
+                  "  SCALING_METHOD_CHIMERA,",
+                  "  SCALING_METHOD_LS1,",''',
+              "TS generator values",
+          )
+          
+          scaling_ui = PLUGIN / "src/components/ScalingControl.tsx"
+          replace_once(
+              scaling_ui,
+              '''  SCALING_METHOD_LS1_PERFORMANCE,
+            SCALING_METHOD_MAKO,
+            SCALING_METHOD_NATIVE,''',
+              '''  SCALING_METHOD_LS1_PERFORMANCE,
+            SCALING_METHOD_MAKO,
+            SCALING_METHOD_CHIMERA,
+            SCALING_METHOD_NATIVE,''',
+              "Scaling UI import",
+          )
+          replace_once(
+              scaling_ui,
+              '''    {
+                data: SCALING_METHOD_LS1_PERFORMANCE,
+                label: t("SCALING_METHOD_LS1_PERFORMANCE", "LS1 Performance"),
+              },
+            ];''',
+              '''    {
+                data: SCALING_METHOD_LS1_PERFORMANCE,
+                label: t("SCALING_METHOD_LS1_PERFORMANCE", "LS1 Performance"),
+              },
+              {
+                data: SCALING_METHOD_CHIMERA,
+                label: "Chimera Neural (CuNNy Fast)",
+              },
+            ];''',
+              "Scaling UI option",
+          )
+          
+          runtime_status = PLUGIN / "src/components/RuntimeStatusCard.tsx"
+          runtime_text = runtime_status.read_text(encoding="utf-8")
+          if 'case "chimera":' not in runtime_text:
+              anchor = '''    case "mako":
+                return t("SCALING_METHOD_MAKO", "MAKO Scaler");'''
+              replacement = '''    case "mako":
+                return t("SCALING_METHOD_MAKO", "MAKO Scaler");
+              case "chimera":
+                return "Chimera Neural";'''
+              if anchor not in runtime_text:
+                  raise SystemExit("runtime status patch anchor missing")
+              runtime_status.write_text(
+                  runtime_text.replace(anchor, replacement, 1), encoding="utf-8"
+              )
+              print("patched runtime status label")
+          
+          # 2) Convert trained CuNNy-fast-DS mpv stages into ordinary Vulkan compute shaders.
+          shader_dir = ENGINE / "mako-render/src/shaders"
+          shader_dir.mkdir(parents=True, exist_ok=True)
+          cunny_source = (CUNNY / "mpv/ds/CuNNy-fast-DS.glsl").read_text(encoding="utf-8")
+          
+          sections = {}
+          for part in re.split(r"(?=//!DESC )", cunny_source):
+              match = re.match(r"//!DESC ([^\n]+)", part)
+              if match:
+                  sections[match.group(1).strip()] = part
+          
+          required = {
+              "CuNNy-fast-DS-in": ("chimera_cunny_in.comp", "in"),
+              "CuNNy-fast-DS-conv1": ("chimera_cunny_conv1.comp", "conv1"),
+              "CuNNy-fast-DS-conv2": ("chimera_cunny_conv2.comp", "conv2"),
+              "CuNNy-fast-DS-out-shuffle": ("chimera_cunny_out.comp", "out"),
+          }
+          missing = set(required) - set(sections)
+          if missing:
+              raise SystemExit(f"CuNNy layout changed; missing stages: {sorted(missing)}")
+          
+          fp16_block = re.compile(
+              r"#extension GL_EXT_shader_explicit_arithmetic_types_float16 : enable\s*"
+              r"#ifdef GL_EXT_shader_explicit_arithmetic_types_float16.*?#endif",
+              re.S,
+          )
+          
+          def convert_stage(name: str, filename: str, kind: str):
+              body = sections[name]
+              body = "\n".join(
+                  line for line in body.splitlines() if not line.startswith("//!")
+              ).strip()
+              body, count = fp16_block.subn(
+                  "#define V4 vec4\n#define M4 mat4\n#define F float",
+                  body,
+                  count=1,
+              )
+              if count != 1:
+                  raise SystemExit(f"{name}: could not replace FP16 conditional")
+              body = body.replace("void hook()", "void main()", 1)
+          
+              pos_anchor = "ivec2 pos = ivec2(gl_WorkGroupID.xy) * ivec2(8, 8) + xy;"
+              if pos_anchor not in body:
+                  raise SystemExit(f"{name}: logical-position anchor missing")
+              body = body.replace(
+                  pos_anchor,
+                  pos_anchor + "\n\tbool chimeraLaneValid = all(lessThan(pos, ivec2(LUMA_size)));",
+                  1,
+              )
+              # Never early-return before CuNNy's shared-memory barrier. Out-of-range
+              # lanes compute clamped edge values but suppress all image writes.
+              body = body.replace("imageStore(", "if (chimeraLaneValid) imageStore(")
+          
+              common = '''#version 450
+          
+          // Chimera Neural Phase 1
+          // Learned weights and topology derived from CuNNy-fast-DS.
+          // CuNNy copyright (c) 2024 funnyplanter, LGPL-3.0-or-later.
+          // FP32 arithmetic in this compatibility build; feature storage remains FP16.
+          layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+          
+          layout(set = 0, binding = 16) uniform sampler chimeraSampler;
+          '''
+              if kind == "in":
+                  bindings = '''
+          layout(set = 0, binding = 32) uniform texture2D LUMA_texture;
+          layout(set = 0, binding = 48, rgba16f) uniform writeonly image2D out_image;
+          #define LUMA_raw sampler2D(LUMA_texture, chimeraSampler)
+          #define LUMA_mul 1.0
+          #define LUMA_size textureSize(sampler2D(LUMA_texture, chimeraSampler), 0)
+          '''
+              elif kind == "conv1":
+                  bindings = '''
+          layout(set = 0, binding = 32) uniform texture2D in_texture;
+          layout(set = 0, binding = 33) uniform texture2D LUMA_texture;
+          layout(set = 0, binding = 48, rgba16f) uniform writeonly image2D out_image;
+          #define in_raw sampler2D(in_texture, chimeraSampler)
+          #define in_mul 1.0
+          #define LUMA_size textureSize(sampler2D(LUMA_texture, chimeraSampler), 0)
+          '''
+              elif kind == "conv2":
+                  bindings = '''
+          layout(set = 0, binding = 32) uniform texture2D conv1_texture;
+          layout(set = 0, binding = 33) uniform texture2D LUMA_texture;
+          layout(set = 0, binding = 48, rgba16f) uniform writeonly image2D out_image;
+          #define conv1_raw sampler2D(conv1_texture, chimeraSampler)
+          #define conv1_mul 1.0
+          #define LUMA_size textureSize(sampler2D(LUMA_texture, chimeraSampler), 0)
+          '''
+              elif kind == "out":
+                  bindings = '''
+          layout(set = 0, binding = 32) uniform texture2D conv2_texture;
+          layout(set = 0, binding = 33) uniform texture2D LUMA_texture;
+          layout(set = 0, binding = 48, rgba16f) uniform writeonly image2D out_image;
+          #define conv2_raw sampler2D(conv2_texture, chimeraSampler)
+          #define conv2_mul 1.0
+          #define LUMA_size textureSize(sampler2D(LUMA_texture, chimeraSampler), 0)
+          #define LUMA_pt (vec2(1.0) / vec2(LUMA_size))
+          #define LUMA_tex(uv) textureLod(sampler2D(LUMA_texture, chimeraSampler), (uv), 0.0)
+          '''
+              else:
+                  raise AssertionError(kind)
+          
+              (shader_dir / filename).write_text(
+                  common + bindings + "\n" + body + "\n", encoding="utf-8"
+              )
+              print(f"generated {filename} from {name}")
+          
+          for stage_name, (filename, kind) in required.items():
+              convert_stage(stage_name, filename, kind)
+          
+          (shader_dir / "chimera_proxy.comp").write_text(r'''#version 450
+          layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+          layout(set = 0, binding = 16) uniform sampler chimeraSampler;
+          layout(set = 0, binding = 32) uniform texture2D baseTexture;
+          layout(set = 0, binding = 48, rgba16f) uniform writeonly image2D proxyImage;
+          
+          float chimeraLuma(vec3 c) {
+              return dot(c, vec3(0.2126, 0.7152, 0.0722));
+          }
+          
+          void main() {
+              ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+              ivec2 outSize = imageSize(proxyImage);
+              if (any(greaterThanEqual(p, outSize)))
+                  return;
+              vec2 uv = (vec2(p) + vec2(0.5)) / vec2(outSize);
+              vec3 rgb = textureLod(
+                  sampler2D(baseTexture, chimeraSampler), uv, 0.0
+              ).rgb;
+              float y = chimeraLuma(rgb);
+              imageStore(proxyImage, p, vec4(y, 0.0, 0.0, 1.0));
+          }
+          ''', encoding="utf-8")
+          
+          (shader_dir / "chimera_composite.comp").write_text(r'''#version 450
+          layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+          layout(set = 0, binding = 16) uniform sampler chimeraSampler;
+          layout(set = 0, binding = 32) uniform texture2D baseTexture;
+          layout(set = 0, binding = 33) uniform texture2D proxyTexture;
+          layout(set = 0, binding = 34) uniform texture2D neuralTexture;
+          layout(set = 0, binding = 48, rgba8) uniform writeonly image2D outputImage;
+          
+          float chimeraLuma(vec3 c) {
+              return dot(c, vec3(0.2126, 0.7152, 0.0722));
+          }
+          
+          void main() {
+              ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+              ivec2 outSize = imageSize(outputImage);
+              if (any(greaterThanEqual(p, outSize)))
+                  return;
+          
+              vec2 uv = (vec2(p) + vec2(0.5)) / vec2(outSize);
+              vec4 base = textureLod(
+                  sampler2D(baseTexture, chimeraSampler), uv, 0.0
+              );
+              float ordinaryY = textureLod(
+                  sampler2D(proxyTexture, chimeraSampler), uv, 0.0
+              ).r;
+              float neuralY = textureLod(
+                  sampler2D(neuralTexture, chimeraSampler), uv, 0.0
+              ).r;
+          
+              // CuNNy's final stage is ordinary 2x luma + learned CNN correction.
+              // Transfer only that correction to the untouched full-resolution base.
+              float residual = clamp(neuralY - ordinaryY, -0.10, 0.10);
+              float baseY = chimeraLuma(base.rgb);
+              float confidence = smoothstep(0.0015, 0.040, abs(residual));
+              float shadowGate = smoothstep(0.015, 0.075, baseY);
+              float highlightGate = 1.0 - smoothstep(0.90, 1.03, baseY);
+              float edit = residual * 0.70 * confidence * shadowGate * highlightGate;
+          
+              float targetY = max(0.0, baseY + edit);
+              float ratio = targetY / max(baseY, 0.025);
+              ratio = clamp(ratio, 0.82, 1.18);
+              vec3 corrected = base.rgb * ratio;
+              corrected = mix(base.rgb, corrected, smoothstep(0.010, 0.050, baseY));
+              imageStore(outputImage, p, vec4(clamp(corrected, 0.0, 1.0), base.a));
+          }
+          ''', encoding="utf-8")
+          
+          # 3) Embedded SPIR-V generator.
+          generator = ENGINE / "scripts/generate-chimera-cunny-spirv.py"
+          generator.write_text(r'''#!/usr/bin/env python3
+          from pathlib import Path
+          import shutil
+          import struct
+          import subprocess
+          import tempfile
+          
+          ROOT = Path(__file__).resolve().parent.parent
+          SHADER_DIR = ROOT / "mako-render/src/shaders"
+          OUTPUT = SHADER_DIR / "chimera_cunny_spirv.hpp"
+          SHADERS = (
+              ("chimeraProxySpirv", "chimera_proxy.comp"),
+              ("chimeraCunnyInSpirv", "chimera_cunny_in.comp"),
+              ("chimeraCunnyConv1Spirv", "chimera_cunny_conv1.comp"),
+              ("chimeraCunnyConv2Spirv", "chimera_cunny_conv2.comp"),
+              ("chimeraCunnyOutSpirv", "chimera_cunny_out.comp"),
+              ("chimeraCompositeSpirv", "chimera_composite.comp"),
+          )
+          
+          def format_words(data: bytes) -> str:
+              if len(data) % 4:
+                  raise SystemExit("SPIR-V payload is not word aligned")
+              vals = struct.unpack(f"<{len(data)//4}I", data)
+              return "\n".join(
+                  "      " + ", ".join(f"0x{x:08x}" for x in vals[i:i+6]) + ","
+                  for i in range(0, len(vals), 6)
+              )
+          
+          payloads = []
+          with tempfile.TemporaryDirectory(prefix="chimera-cunny-") as td:
+              for symbol, filename in SHADERS:
+                  source = SHADER_DIR / filename
+                  binary = Path(td) / (filename + ".spv")
+                  subprocess.run(
+                      ["glslangValidator", "-V", "-Os", "--quiet",
+                       "-o", str(binary), str(source)],
+                      check=True,
+                  )
+                  validator = shutil.which("spirv-val")
+                  if validator:
+                      subprocess.run([validator, str(binary)], check=True)
+                  payloads.append((symbol, filename, binary.read_bytes()))
+          
+          lines = [
+              "/* SPDX-License-Identifier: GPL-3.0-or-later */",
+              "#pragma once",
+              "",
+              "// Generated Chimera Neural Phase 1 SPIR-V.",
+              "// CuNNy-derived network stages: LGPL-3.0-or-later.",
+              "#include <array>",
+              "#include <cstdint>",
+              "",
+              "namespace mako::layer::embedded {",
+          ]
+          for symbol, filename, payload in payloads:
+              lines += [
+                  f"    // {filename}",
+                  f"    inline constexpr std::array<uint32_t, {len(payload)//4}> {symbol} = {{",
+                  format_words(payload),
+                  "    };",
+              ]
+          lines += ["}", ""]
+          OUTPUT.write_text("\n".join(lines), encoding="utf-8")
+          print(f"generated {OUTPUT} ({sum(len(p) for _,_,p in payloads)} SPIR-V bytes)")
+          ''', encoding="utf-8")
+          generator.chmod(0o755)
+          
+          # 4) Native MAKO renderer integration.
+          spatial_cpp = ENGINE / "mako-render/src/spatial_scaler.cpp"
+          replace_once(
+              spatial_cpp,
+              '#include "shaders/spatial_scaling_spirv.hpp"',
+              '#include "shaders/spatial_scaling_spirv.hpp"\n'
+              '#include "shaders/chimera_cunny_spirv.hpp"',
+              "Chimera SPIR-V include",
+          )
+          
+          helper = r'''
+              void bindAndDispatch8(const vk::Vulkan& vk,
+                      const VkCommandBuffer commandBuffer,
+                      const vk::Shader& shader,
+                      const vk::DescriptorSet& descriptorSet,
+                      const VkExtent2D extent) {
+                  vk.df().CmdBindPipeline(
+                      commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, shader.pipeline()
+                  );
+                  const auto descriptor = descriptorSet.handle();
+                  vk.df().CmdBindDescriptorSets(
+                      commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                      shader.pipelinelayout(), 0, 1, &descriptor, 0, nullptr
+                  );
+                  vk.df().CmdDispatch(
+                      commandBuffer, (extent.width + 7) / 8,
+                      (extent.height + 7) / 8, 1
+                  );
+              }
+          
+          '''
+          replace_once(
+              spatial_cpp,
+              '    class Pipeline {\n',
+              helper + '    class Pipeline {\n',
+              "8x8 neural dispatch helper",
+          )
+          
+          CHIMERA_CLASS = r'''
+              class ChimeraPipeline final : public Pipeline {
+              public:
+                  struct alignas(16) Parameters {
+                      float sourceWidth;
+                      float sourceHeight;
+                      float presentationWidth;
+                      float presentationHeight;
+                      float sharpness;
+                      float reserved0{0.0F};
+                      float reserved1{0.0F};
+                      float reserved2{0.0F};
+                  };
+          
+                  ChimeraPipeline(const vk::Vulkan& vk,
+                          const VkExtent2D sourceExtent,
+                          const VkExtent2D presentationExtent,
+                          const VkFormat workingFormat,
+                          const float sharpness) :
+                      sourceSize(sourceExtent),
+                      presentationSize(presentationExtent),
+                      proxySize{
+                          (presentationExtent.width + 1U) / 2U,
+                          (presentationExtent.height + 1U) / 2U
+                      },
+                      neuralSize{this->proxySize.width * 2U, this->proxySize.height * 2U},
+                      sourceImage(vk, sourceExtent, workingFormat,
+                          VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT),
+                      baseImage(vk, presentationExtent, workingFormat,
+                          VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT),
+                      proxyLuma(vk, this->proxySize, VK_FORMAT_R16G16B16A16_SFLOAT,
+                          VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT),
+                      featureA(vk, {this->proxySize.width * 3U, this->proxySize.height},
+                          VK_FORMAT_R16G16B16A16_SFLOAT,
+                          VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT),
+                      featureB(vk, {this->proxySize.width * 3U, this->proxySize.height},
+                          VK_FORMAT_R16G16B16A16_SFLOAT,
+                          VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT),
+                      featureC(vk, {this->proxySize.width * 2U, this->proxySize.height},
+                          VK_FORMAT_R16G16B16A16_SFLOAT,
+                          VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT),
+                      neuralLuma(vk, this->neuralSize, VK_FORMAT_R16G16B16A16_SFLOAT,
+                          VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT),
+                      reconstructedImage(vk, presentationExtent, workingFormat,
+                          VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT),
+                      baseShader(vk, scalingShader(workingFormat), 1, 1, 1, 1),
+                      proxyShader(vk, mako::layer::embedded::chimeraProxySpirv,
+                          1, 1, 0, 1),
+                      stage0(vk, mako::layer::embedded::chimeraCunnyInSpirv,
+                          1, 1, 0, 1),
+                      stage1(vk, mako::layer::embedded::chimeraCunnyConv1Spirv,
+                          2, 1, 0, 1),
+                      stage2(vk, mako::layer::embedded::chimeraCunnyConv2Spirv,
+                          2, 1, 0, 1),
+                      stage3(vk, mako::layer::embedded::chimeraCunnyOutSpirv,
+                          2, 1, 0, 1),
+                      compositeShader(vk, mako::layer::embedded::chimeraCompositeSpirv,
+                          3, 1, 0, 1),
+                      descriptorPool(vk, {
+                          .sets = 7,
+                          .uniform_buffers = 1,
+                          .samplers = 7,
+                          .sampled_images = 12,
+                          .storage_images = 7,
+                      }),
+                      sampler(vk, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                          VK_COMPARE_OP_NEVER, false),
+                      parameterBuffer(vk, Parameters{
+                          .sourceWidth = static_cast<float>(sourceExtent.width),
+                          .sourceHeight = static_cast<float>(sourceExtent.height),
+                          .presentationWidth =
+                              static_cast<float>(presentationExtent.width),
+                          .presentationHeight =
+                              static_cast<float>(presentationExtent.height),
+                          .sharpness = sharpness,
+                      }),
+                      baseDescriptors(vk, this->descriptorPool, this->baseShader,
+                          std::vector<ls::R<const vk::Image>>{
+                              std::cref(this->sourceImage)
+                          },
+                          std::vector<ls::R<const vk::Image>>{
+                              std::cref(this->baseImage)
+                          },
+                          std::vector<ls::R<const vk::Sampler>>{
+                              std::cref(this->sampler)
+                          },
+                          std::vector<ls::R<const vk::Buffer>>{
+                              std::cref(this->parameterBuffer)
+                          }),
+                      proxyDescriptors(vk, this->descriptorPool, this->proxyShader,
+                          std::vector<ls::R<const vk::Image>>{
+                              std::cref(this->baseImage)
+                          },
+                          std::vector<ls::R<const vk::Image>>{
+                              std::cref(this->proxyLuma)
+                          },
+                          std::vector<ls::R<const vk::Sampler>>{
+                              std::cref(this->sampler)
+                          },
+                          std::vector<ls::R<const vk::Buffer>>{}),
+                      stage0Descriptors(vk, this->descriptorPool, this->stage0,
+                          std::vector<ls::R<const vk::Image>>{
+                              std::cref(this->proxyLuma)
+                          },
+                          std::vector<ls::R<const vk::Image>>{
+                              std::cref(this->featureA)
+                          },
+                          std::vector<ls::R<const vk::Sampler>>{
+                              std::cref(this->sampler)
+                          },
+                          std::vector<ls::R<const vk::Buffer>>{}),
+                      stage1Descriptors(vk, this->descriptorPool, this->stage1,
+                          std::vector<ls::R<const vk::Image>>{
+                              std::cref(this->featureA),
+                              std::cref(this->proxyLuma)
+                          },
+                          std::vector<ls::R<const vk::Image>>{
+                              std::cref(this->featureB)
+                          },
+                          std::vector<ls::R<const vk::Sampler>>{
+                              std::cref(this->sampler)
+                          },
+                          std::vector<ls::R<const vk::Buffer>>{}),
+                      stage2Descriptors(vk, this->descriptorPool, this->stage2,
+                          std::vector<ls::R<const vk::Image>>{
+                              std::cref(this->featureB),
+                              std::cref(this->proxyLuma)
+                          },
+                          std::vector<ls::R<const vk::Image>>{
+                              std::cref(this->featureC)
+                          },
+                          std::vector<ls::R<const vk::Sampler>>{
+                              std::cref(this->sampler)
+                          },
+                          std::vector<ls::R<const vk::Buffer>>{}),
+                      stage3Descriptors(vk, this->descriptorPool, this->stage3,
+                          std::vector<ls::R<const vk::Image>>{
+                              std::cref(this->featureC),
+                              std::cref(this->proxyLuma)
+                          },
+                          std::vector<ls::R<const vk::Image>>{
+                              std::cref(this->neuralLuma)
+                          },
+                          std::vector<ls::R<const vk::Sampler>>{
+                              std::cref(this->sampler)
+                          },
+                          std::vector<ls::R<const vk::Buffer>>{}),
+                      compositeDescriptors(vk, this->descriptorPool,
+                          this->compositeShader,
+                          std::vector<ls::R<const vk::Image>>{
+                              std::cref(this->baseImage),
+                              std::cref(this->proxyLuma),
+                              std::cref(this->neuralLuma)
+                          },
+                          std::vector<ls::R<const vk::Image>>{
+                              std::cref(this->reconstructedImage)
+                          },
+                          std::vector<ls::R<const vk::Sampler>>{
+                              std::cref(this->sampler)
+                          },
+                          std::vector<ls::R<const vk::Buffer>>{}) {}
+          
+                  [[nodiscard]] const vk::Image& input() const override {
+                      return this->sourceImage;
+                  }
+          
+                  [[nodiscard]] const vk::Image& output() const override {
+                      return this->reconstructedImage;
+                  }
+          
+                  void configureDirectOutputs(const vk::Vulkan& vk,
+                          const std::span<const std::reference_wrapper<const vk::Image>>
+                              outputs) override {
+                      std::optional<vk::DescriptorPool> replacementPool;
+                      std::vector<vk::DescriptorSet> replacementSets;
+                      std::vector<VkImage> replacementHandles;
+                      if (!outputs.empty()) {
+                          const auto count = static_cast<uint32_t>(outputs.size());
+                          replacementPool.emplace(vk, vk::Limits{
+                              .sets = count,
+                              .uniform_buffers = 0,
+                              .samplers = count,
+                              .sampled_images = count * 3U,
+                              .storage_images = count,
+                          });
+                          replacementSets.reserve(outputs.size());
+                          replacementHandles.reserve(outputs.size());
+                          for (const auto& output : outputs) {
+                              replacementSets.emplace_back(
+                                  vk, *replacementPool, this->compositeShader,
+                                  std::vector<ls::R<const vk::Image>>{
+                                      std::cref(this->baseImage),
+                                      std::cref(this->proxyLuma),
+                                      std::cref(this->neuralLuma)
+                                  },
+                                  std::vector<ls::R<const vk::Image>>{
+                                      std::cref(output.get())
+                                  },
+                                  std::vector<ls::R<const vk::Sampler>>{
+                                      std::cref(this->sampler)
+                                  },
+                                  std::vector<ls::R<const vk::Buffer>>{}
+                              );
+                              replacementHandles.push_back(output.get().handle());
+                          }
+                      }
+                      this->directDescriptorSets.clear();
+                      this->directDescriptorPool.reset();
+                      this->directDescriptorPool = std::move(replacementPool);
+                      this->directDescriptorSets = std::move(replacementSets);
+                      this->directOutputs = std::move(replacementHandles);
+                  }
+          
+                  void clearDirectOutputs() override {
+                      this->directDescriptorSets.clear();
+                      this->directDescriptorPool.reset();
+                      this->directOutputs.clear();
+                  }
+          
+                  [[nodiscard]] size_t directOutputCount() const override {
+                      return this->directOutputs.size();
+                  }
+          
+                  [[nodiscard]] bool hasDirectOutput(
+                          const VkImage image) const override {
+                      return directOutputIndex(this->directOutputs, image).has_value();
+                  }
+          
+                  void recordCompute(const vk::Vulkan& vk,
+                          const VkCommandBuffer commandBuffer,
+                          const VkImage directOutput) const override {
+                      const auto directIndex = directOutput == VK_NULL_HANDLE
+                          ? std::optional<size_t>{}
+                          : directOutputIndex(this->directOutputs, directOutput);
+                      const VkImage outputImage = directIndex
+                          ? directOutput : this->reconstructedImage.handle();
+                      const auto& finalDescriptors = directIndex
+                          ? this->directDescriptorSets.at(*directIndex)
+                          : this->compositeDescriptors;
+          
+                      const std::array initialBarriers{
+                          imageBarrier(
+                              this->sourceImage.handle(), VK_ACCESS_TRANSFER_WRITE_BIT,
+                              VK_ACCESS_SHADER_READ_BIT,
+                              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                              VK_IMAGE_LAYOUT_GENERAL
+                          ),
+                          imageBarrier(
+                              this->baseImage.handle(), VK_ACCESS_NONE,
+                              VK_ACCESS_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                              VK_IMAGE_LAYOUT_GENERAL
+                          ),
+                          imageBarrier(
+                              this->proxyLuma.handle(), VK_ACCESS_NONE,
+                              VK_ACCESS_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                              VK_IMAGE_LAYOUT_GENERAL
+                          ),
+                          imageBarrier(
+                              this->featureA.handle(), VK_ACCESS_NONE,
+                              VK_ACCESS_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                              VK_IMAGE_LAYOUT_GENERAL
+                          ),
+                          imageBarrier(
+                              this->featureB.handle(), VK_ACCESS_NONE,
+                              VK_ACCESS_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                              VK_IMAGE_LAYOUT_GENERAL
+                          ),
+                          imageBarrier(
+                              this->featureC.handle(), VK_ACCESS_NONE,
+                              VK_ACCESS_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                              VK_IMAGE_LAYOUT_GENERAL
+                          ),
+                          imageBarrier(
+                              this->neuralLuma.handle(), VK_ACCESS_NONE,
+                              VK_ACCESS_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                              VK_IMAGE_LAYOUT_GENERAL
+                          ),
+                          imageBarrier(
+                              outputImage, VK_ACCESS_NONE,
+                              VK_ACCESS_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                              VK_IMAGE_LAYOUT_GENERAL
+                          ),
+                      };
+                      vk.df().CmdPipelineBarrier(
+                          commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+                          0, nullptr, 0, nullptr,
+                          static_cast<uint32_t>(initialBarriers.size()),
+                          initialBarriers.data()
+                      );
+          
+                      bindAndDispatch8(
+                          vk, commandBuffer, this->baseShader,
+                          this->baseDescriptors, this->presentationSize
+                      );
+                      shaderWriteToReadBarrier(
+                          vk, commandBuffer, this->baseImage.handle()
+                      );
+          
+                      bindAndDispatch8(
+                          vk, commandBuffer, this->proxyShader,
+                          this->proxyDescriptors, this->proxySize
+                      );
+                      shaderWriteToReadBarrier(
+                          vk, commandBuffer, this->proxyLuma.handle()
+                      );
+          
+                      bindAndDispatch8(
+                          vk, commandBuffer, this->stage0,
+                          this->stage0Descriptors, this->proxySize
+                      );
+                      shaderWriteToReadBarrier(
+                          vk, commandBuffer, this->featureA.handle()
+                      );
+          
+                      bindAndDispatch8(
+                          vk, commandBuffer, this->stage1,
+                          this->stage1Descriptors, this->proxySize
+                      );
+                      shaderWriteToReadBarrier(
+                          vk, commandBuffer, this->featureB.handle()
+                      );
+          
+                      bindAndDispatch8(
+                          vk, commandBuffer, this->stage2,
+                          this->stage2Descriptors, this->proxySize
+                      );
+                      shaderWriteToReadBarrier(
+                          vk, commandBuffer, this->featureC.handle()
+                      );
+          
+                      bindAndDispatch8(
+                          vk, commandBuffer, this->stage3,
+                          this->stage3Descriptors, this->proxySize
+                      );
+                      shaderWriteToReadBarrier(
+                          vk, commandBuffer, this->neuralLuma.handle()
+                      );
+          
+                      bindAndDispatch8(
+                          vk, commandBuffer, this->compositeShader,
+                          finalDescriptors, this->presentationSize
+                      );
+          
+                      const auto outputBarrier = imageBarrier(
+                          outputImage, VK_ACCESS_SHADER_WRITE_BIT,
+                          VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL,
+                          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
+                      );
+                      vk.df().CmdPipelineBarrier(
+                          commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                          0, nullptr, 0, nullptr, 1, &outputBarrier
+                      );
+                  }
+          
+              private:
+                  static void shaderWriteToReadBarrier(const vk::Vulkan& vk,
+                          const VkCommandBuffer commandBuffer, const VkImage image) {
+                      const auto barrier = imageBarrier(
+                          image, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                          VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL
+                      );
+                      vk.df().CmdPipelineBarrier(
+                          commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+                          0, nullptr, 0, nullptr, 1, &barrier
+                      );
+                  }
+          
+                  VkExtent2D sourceSize{};
+                  VkExtent2D presentationSize{};
+                  VkExtent2D proxySize{};
+                  VkExtent2D neuralSize{};
+                  vk::Image sourceImage;
+                  vk::Image baseImage;
+                  vk::Image proxyLuma;
+                  vk::Image featureA;
+                  vk::Image featureB;
+                  vk::Image featureC;
+                  vk::Image neuralLuma;
+                  vk::Image reconstructedImage;
+                  vk::Shader baseShader;
+                  vk::Shader proxyShader;
+                  vk::Shader stage0;
+                  vk::Shader stage1;
+                  vk::Shader stage2;
+                  vk::Shader stage3;
+                  vk::Shader compositeShader;
+                  vk::DescriptorPool descriptorPool;
+                  vk::Sampler sampler;
+                  vk::Buffer parameterBuffer;
+                  vk::DescriptorSet baseDescriptors;
+                  vk::DescriptorSet proxyDescriptors;
+                  vk::DescriptorSet stage0Descriptors;
+                  vk::DescriptorSet stage1Descriptors;
+                  vk::DescriptorSet stage2Descriptors;
+                  vk::DescriptorSet stage3Descriptors;
+                  vk::DescriptorSet compositeDescriptors;
+                  std::optional<vk::DescriptorPool> directDescriptorPool;
+                  std::vector<vk::DescriptorSet> directDescriptorSets;
+                  std::vector<VkImage> directOutputs;
+              };
+          
+          '''
+          replace_once(
+              spatial_cpp,
+              '    class Ls1Pipeline final : public Pipeline {\n',
+              CHIMERA_CLASS + '    class Ls1Pipeline final : public Pipeline {\n',
+              "Chimera Vulkan pipeline",
+          )
+          
+          factory_anchor = '''        const bool ls1Requested =
+                      ls::licensedScalingModelRequested(requested);
+          '''
+          factory_insert = '''        if (requested == ls::ScalingMethod::Chimera) {
+                      if (workingFormat != VK_FORMAT_R8G8B8A8_UNORM) {
+                          this->fallback =
+                              "Chimera Neural Phase 1 is SDR-only; using MAKO Scaler";
+                          this->active = ls::ScalingMethod::Mako;
+                      } else {
+                          try {
+                              this->pipeline = std::make_unique<ChimeraPipeline>(
+                                  vk, sourceExtent, presentationExtent,
+                                  workingFormat, sharpness
+                              );
+                              return;
+                          } catch (const std::exception& error) {
+                              this->fallback =
+                                  std::string("Chimera Neural failed: ") + error.what();
+                              this->active = ls::ScalingMethod::Mako;
+                          }
+                      }
+                  }
+                  const bool ls1Requested =
+                      ls::licensedScalingModelRequested(requested);
+          '''
+          replace_once(
+              spatial_cpp,
+              factory_anchor,
+              factory_insert,
+              "Chimera pipeline factory",
+          )
+          
+          # 5) Licensing/provenance.
+          notices = ROOT / "THIRD_PARTY_NOTICES.md"
+          license_text = (CUNNY / "LICENSE").read_text(encoding="utf-8")
+          with notices.open("a", encoding="utf-8") as f:
+              f.write(
+                  "\n\n## CuNNy (Chimera Neural experimental scaler)\n\n"
+                  "CuNNy-fast-DS network topology and learned shader weights are derived "
+                  "from CuNNy by funnyplanter, licensed LGPL-3.0-or-later.\n\n"
+                  "The applicable license text follows:\n\n```\n"
+              )
+              f.write(license_text)
+              f.write("\n```\n")
+          
+          subprocess.run(
+              ["python3", str(PLUGIN / "scripts/generate_ts_schema.py")], check=True
+          )
+          print("Chimera Neural Phase 1 source patch complete")
+          PY
+
+      - name: Compile and validate Chimera neural SPIR-V
+        shell: bash
+        working-directory: MAKO
+        run: |
+          python3 engine/scripts/generate-chimera-cunny-spirv.py
+          test -s engine/mako-render/src/shaders/chimera_cunny_spirv.hpp
+          grep -Fq 'chimeraCunnyInSpirv' engine/mako-render/src/shaders/chimera_cunny_spirv.hpp
+          grep -Fq 'chimeraCunnyOutSpirv' engine/mako-render/src/shaders/chimera_cunny_spirv.hpp
+          grep -Fq 'ScalingMethod::Chimera' engine/mako-render/src/spatial_scaler.cpp
+          grep -Fq 'SCALING_METHOD_CHIMERA' plugin/src/config/generatedConfigSchema.ts
+          grep -Fq 'Chimera Neural (CuNNy Fast)' plugin/src/components/ScalingControl.tsx
+
+      - name: Install Decky frontend dependencies
+        shell: bash
+        working-directory: MAKO/plugin
+        run: |
+          pnpm install --frozen-lockfile
+
+      - name: Build and test complete MAKO renderer package
+        shell: bash
+        working-directory: MAKO/plugin
+        env:
+          MAKO_BUILD_JOBS: '2'
+        run: |
+          pnpm run package:local-engine-fast
+
+      - name: Verify installable Decky ZIP contains neural renderer
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP="$(find MAKO/plugin/out -maxdepth 1 -type f -name 'MAKO-Decky-local.*.zip' | head -n 1)"
+          if [[ -z "$ZIP" ]]; then
+            echo "No MAKO local Decky ZIP found"
+            find MAKO/plugin/out -maxdepth 2 -type f -print || true
+            exit 1
+          fi
+
+          unzip -t "$ZIP" >/dev/null
+          rm -rf verify-chimera
+          mkdir verify-chimera
+          unzip -q "$ZIP" -d verify-chimera
+
+          test -s verify-chimera/Mako/plugin.json
+          test -s verify-chimera/Mako/package.json
+          test -s verify-chimera/Mako/main.py
+          test -s verify-chimera/Mako/dist/index.js
+          grep -Fq '"name": "MAKO - Frame Generation"' verify-chimera/Mako/plugin.json
+          grep -Fq 'Chimera Neural' verify-chimera/Mako/dist/index.js
+
+          ENGINE_ARCHIVE="$(find verify-chimera/Mako/bin -maxdepth 1 -type f -name 'MAKO-Renderer-*.tar.xz' | head -n 1)"
+          if [[ -z "$ENGINE_ARCHIVE" ]]; then
+            echo "Bundled MAKO renderer archive missing"
+            exit 1
+          fi
+          tar -xJOf "$ENGINE_ARCHIVE" ./lib/libmako-render-scaling.so > /tmp/chimera-renderer.so
+          strings /tmp/chimera-renderer.so | grep -Fq 'Chimera Neural Phase 1'
+
+          SIZE="$(stat -c %s "$ZIP")"
+          if (( SIZE < 5000000 )); then
+            echo "Package is unexpectedly small: $SIZE bytes"
+            exit 1
+          fi
+
+          cp "$ZIP" Chimera-Neural-Phase1-MAKO-ROG-Ally.zip
+          sha256sum Chimera-Neural-Phase1-MAKO-ROG-Ally.zip
+          ls -lh Chimera-Neural-Phase1-MAKO-ROG-Ally.zip
+
+      - name: Upload Chimera Neural MAKO tester
+        uses: actions/upload-artifact@v7.0.0
+        with:
+          name: Chimera-Neural-Phase1-MAKO-ROG-Ally
+          path: Chimera-Neural-Phase1-MAKO-ROG-Ally.zip
+          if-no-files-found: error
