@@ -78,17 +78,17 @@ jobs:
         working-directory: dxvk
         run: |
           export VERSION_NAME="chimera-dxvk-raw-depth-v5"
-          ./package-release.sh "" build --no-package
+          ./package-release.sh "$VERSION_NAME" build --no-package
 
       - name: Verify and package runtime
         working-directory: dxvk
         run: |
           set -euxo pipefail
           root="build/dxvk-chimera-dxvk-raw-depth-v5"
-          test -f "/x64/d3d11.dll"
-          test -f "/x64/dxgi.dll"
-          test -f "/x32/d3d11.dll"
-          test -f "/x32/dxgi.dll"
+          test -f "$root/x64/d3d11.dll"
+          test -f "$root/x64/dxgi.dll"
+          test -f "$root/x32/d3d11.dll"
+          test -f "$root/x32/dxgi.dll"
           python3 - <<'PY'
           from pathlib import Path
           p = Path('build/dxvk-chimera-dxvk-raw-depth-v5/x64/d3d11.dll')
@@ -99,10 +99,10 @@ jobs:
           print('Inherited probe marker verification: PASS')
           PY
           mkdir -p ../runtime_bundle
-          cp "/x64/d3d11.dll" ../runtime_bundle/d3d11_64.dll
-          cp "/x64/dxgi.dll"  ../runtime_bundle/dxgi_64.dll
-          cp "/x32/d3d11.dll" ../runtime_bundle/d3d11_32.dll
-          cp "/x32/dxgi.dll"  ../runtime_bundle/dxgi_32.dll
+          cp "$root/x64/d3d11.dll" ../runtime_bundle/d3d11_64.dll
+          cp "$root/x64/dxgi.dll"  ../runtime_bundle/dxgi_64.dll
+          cp "$root/x32/d3d11.dll" ../runtime_bundle/d3d11_32.dll
+          cp "$root/x32/dxgi.dll"  ../runtime_bundle/dxgi_32.dll
           cp LICENSE ../runtime_bundle/DXVK-LICENSE
           sha256sum ../runtime_bundle/*.dll
 
