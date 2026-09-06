@@ -1,0 +1,164 @@
+name: Chimera DXVK GI Hits v9
+
+on:
+  push:
+    branches:
+      - chimera-amd-nr
+    paths:
+      - '.github/workflows/chimera_dxvk_gi_hits_v9.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-dxvk:
+    name: Build DXVK screen-space GI hit visualizer
+    runs-on: ubuntu-latest
+    container: archlinux/archlinux:base-devel
+
+    steps:
+      - name: Install build dependencies
+        run: pacman -Syu --needed --noconfirm git meson mingw-w64-gcc glslang python python-yaml
+
+      - name: Clone Chimera source and pinned DXVK
+        run: |
+          git clone --branch chimera-amd-nr --single-branch https://github.com/doubledd1403-hue/OptiScaler_DLSSNR.git chimera-source
+          git clone https://github.com/doitsujin/dxvk.git dxvk
+          cd dxvk
+          git checkout d7ac2580aa274a14a500e74edbe4ec6aae250e4a
+          git submodule update --init --recursive
+
+      - name: Reuse V1 renderer probe
+        run: |
+          python3 - <<'PYIN'
+          import yaml
+          from pathlib import Path
+          wf = yaml.safe_load(Path('chimera-source/.github/workflows/chimera_dxvk_probe_v1.yml').read_text())
+          step = next(s for s in wf['jobs']['build-dxvk']['steps'] if s.get('name') == 'Add Chimera DXVK depth probe')
+          Path('/tmp/chimera_v1.sh').write_text(step['run'])
+          PYIN
+          cd dxvk
+          bash /tmp/chimera_v1.sh
+
+      - name: Reuse V2 heartbeat expansion
+        run: |
+          python3 - <<'PYIN'
+          import yaml
+          from pathlib import Path
+          wf = yaml.safe_load(Path('chimera-source/.github/workflows/chimera_dxvk_probe_v2_fix.yml').read_text())
+          step = next(s for s in wf['jobs']['build-dxvk']['steps'] if s.get('name') == 'Expand probe heartbeat and DSV capture paths')
+          Path('/tmp/chimera_v2.sh').write_text(step['run'])
+          PYIN
+          cd dxvk
+          bash /tmp/chimera_v2.sh
+
+      - name: Reuse V4 DSV creation enumeration
+        run: |
+          python3 - <<'PYIN'
+          import yaml
+          from pathlib import Path
+          wf = yaml.safe_load(Path('chimera-source/.github/workflows/chimera_dxvk_depth_create_v4.yml').read_text())
+          step = next(s for s in wf['jobs']['build-dxvk']['steps'] if s.get('name') == 'Add CreateDepthStencilView enumeration')
+          Path('/tmp/chimera_v4.sh').write_text(step['run'])
+          PYIN
+          cd dxvk
+          bash /tmp/chimera_v4.sh
+
+      - name: Reuse V5 scene-depth selection
+        run: |
+          python3 - <<'PYIN'
+          import yaml
+          from pathlib import Path
+          wf = yaml.safe_load(Path('chimera-source/.github/workflows/chimera_dxvk_raw_depth_v5.yml').read_text())
+          step = next(s for s in wf['jobs']['build-dxvk']['steps'] if s.get('name') == 'Add renderer-side raw depth presentation')
+          Path('/tmp/chimera_v5.sh').write_text(step['run'])
+          PYIN
+          cd dxvk
+          bash /tmp/chimera_v5.sh
+
+      - name: Reuse V6 depth decoder
+        run: |
+          python3 - <<'PYIN'
+          import yaml
+          from pathlib import Path
+          wf = yaml.safe_load(Path('chimera-source/.github/workflows/chimera_dxvk_normals_v7.yml').read_text())
+          step = next(s for s in wf['jobs']['build-dxvk']['steps'] if s.get('name') == 'Add V6 upright grayscale depth decoder')
+          Path('/tmp/chimera_v6.sh').write_text(step['run'])
+          PYIN
+          cd dxvk
+          bash /tmp/chimera_v6.sh
+
+      - name: Reuse V7 normal reconstruction
+        run: |
+          python3 - <<'PYIN'
+          import yaml
+          from pathlib import Path
+          wf = yaml.safe_load(Path('chimera-source/.github/workflows/chimera_dxvk_normals_v7.yml').read_text())
+          step = next(s for s in wf['jobs']['build-dxvk']['steps'] if s.get('name') == 'Add V7 depth-derived normal reconstruction')
+          Path('/tmp/chimera_v7.sh').write_text(step['run'])
+          PYIN
+          cd dxvk
+          bash /tmp/chimera_v7.sh
+
+      - name: Reuse V8 projection scanner
+        run: |
+          python3 - <<'PYIN'
+          import yaml
+          from pathlib import Path
+          wf = yaml.safe_load(Path('chimera-source/.github/workflows/chimera_dxvk_projection_probe_v8.yml').read_text())
+          step = next(s for s in wf['jobs']['build-dxvk']['steps'] if s.get('name') == 'Add V8 vertex constant-buffer projection probe')
+          Path('/tmp/chimera_v8.sh').write_text(step['run'])
+          PYIN
+          cd dxvk
+          bash /tmp/chimera_v8.sh
+
+      - name: Add V9 exact-projection screen-space ray hits
+        working-directory: dxvk
+        run: |
+          echo 'CmZyb20gcGF0aGxpYiBpbXBvcnQgUGF0aAoKIyBWOTogdXNlIFlvb2thJ3MgVjgtcHJvdmVuIHByb2plY3Rpb24gKEZPVnkgNDIuNTDCsCwgYXNwZWN0IGZyb20gcmVuZGVyIGV4dGVudCkKIyBhbmQgcmVwbGFjZSB0aGUgVjcgbm9ybWFsIGRlYnVnIG91dHB1dCB3aXRoIGEgNC1yYXkgc2NyZWVuLXNwYWNlIGhpdCBtYXAuCiMgVGhpcyBpcyBoaXQgdmFsaWRhdGlvbiBvbmx5OiBubyByYWRpYW5jZSwgbm8gQU8gY29tcG9zaXRlLCBubyBsaWdodGluZy4KCnAgPSBQYXRoKCdzcmMvZDNkMTEvZDNkMTFfY29udGV4dC5jcHAnKQpzID0gcC5yZWFkX3RleHQoZW5jb2Rpbmc9J3V0Zi04JykKaWYgJ0NISU1FUkFfR0lfSElUU19WOScgbm90IGluIHM6CiAgICBhbmNob3IgPSAnbmFtZXNwYWNlIGR4dmsge1xuJwogICAgaWYgYW5jaG9yIG5vdCBpbiBzOgogICAgICAgIHJhaXNlIFN5c3RlbUV4aXQoJ2QzZDExX2NvbnRleHQgbmFtZXNwYWNlIGFuY2hvciBtaXNzaW5nJykKICAgIHMgPSBzLnJlcGxhY2UoYW5jaG9yLCBhbmNob3IgKyAnXG4gIHN0YXRpYyBjb25zdCBjaGFyKiBnX2NoaW1lcmFHaUhpdHNWOU1hcmtlciA9ICJDSElNRVJBX0dJX0hJVFNfVjkiO1xuJywgMSkKICAgIHAud3JpdGVfdGV4dChzLCBlbmNvZGluZz0ndXRmLTgnKQoKcCA9IFBhdGgoJ3NyYy9keHZrL3NoYWRlcnMvZHh2a19wcmVzZW50X2NvbW1vbi5nbHNsJykKcyA9IHAucmVhZF90ZXh0KGVuY29kaW5nPSd1dGYtOCcpCgpvbGRfcHJvaiA9ICcnJyAgZmxvYXQgYXNwZWN0ID0gZmxvYXQoc3JjX2V4dGVudC54KSAvIG1heChmbG9hdChzcmNfZXh0ZW50LnkpLCAxLjApOwoKICAvLyBOZXV0cmFsIHByb2plY3Rpb24gc2NhbGUgZm9yIHRoaXMgZGlhZ25vc3RpYyBzdGFnZS4gSXQgeWllbGRzIGNvaGVyZW50CiAgLy8gc3VyZmFjZSBvcmllbnRhdGlvbjsgZXhhY3QgcHJvamVjdGlvbiBjYXB0dXJlIGlzIGEgbGF0ZXIgZ2VuZXJpY2l6YXRpb24gc3RlcC4KICByZXR1cm4gdmVjMyhuZGMueCAqIGFzcGVjdCAqIHosIG5kYy55ICogeiwgeik7CicnJwpuZXdfcHJvaiA9ICcnJyAgZmxvYXQgYXNwZWN0ID0gZmxvYXQoc3JjX2V4dGVudC54KSAvIG1heChmbG9hdChzcmNfZXh0ZW50LnkpLCAxLjApOwoKICAvLyBWOCByZXBlYXRlZGx5IGZvdW5kIHRoZSByZWFsIFlvb2thIGdhbWVwbGF5IHByb2plY3Rpb24gYXQgRk9WeSA0Mi41MCBkZWcsCiAgLy8gYXNwZWN0IDEuNzc3OCwgcmV2ZXJzZWQtWi4gTmVhci1wbGFuZSBzY2FsZSBjYW5jZWxzIGJlY2F1c2UgeiBpcyByZWNvbnN0cnVjdGVkCiAgLy8gYXMgMS9kZXB0aCBjb25zaXN0ZW50bHkgZm9yIGJvdGggdGhlIHJheSBhbmQgdGhlIHNjZW5lLgogIGNvbnN0IGZsb2F0IGNoaW1lcmFfdGFuX2hhbGZfZm92eSA9IDAuMzg4ODc4NzMxOTsKICByZXR1cm4gdmVjMygKICAgIG5kYy54ICogYXNwZWN0ICogY2hpbWVyYV90YW5faGFsZl9mb3Z5ICogeiwKICAgIG5kYy55ICogY2hpbWVyYV90YW5faGFsZl9mb3Z5ICogeiwKICAgIHopOwonJycKaWYgb2xkX3Byb2ogbm90IGluIHM6CiAgICByYWlzZSBTeXN0ZW1FeGl0KCdWNyBuZXV0cmFsIHByb2plY3Rpb24gYmxvY2sgbWlzc2luZycpCnMgPSBzLnJlcGxhY2Uob2xkX3Byb2osIG5ld19wcm9qLCAxKQoKYW5jaG9yID0gJ1xuXG52ZWM0IGJsZW5kX3NjX3JnYih2ZWM0IGRzdCwgdmVjNCBzcmMpIHsnCmhlbHBlciA9IHInJycKCi8vIENISU1FUkFfR0lfSElUU19WOQp2ZWMyIGNoaW1lcmFfcHJvamVjdF91dih2ZWMzIHApIHsKICBmbG9hdCBhc3BlY3QgPSBmbG9hdChzcmNfZXh0ZW50LngpIC8gbWF4KGZsb2F0KHNyY19leHRlbnQueSksIDEuMCk7CiAgY29uc3QgZmxvYXQgdGFuX2hhbGZfZm92eSA9IDAuMzg4ODc4NzMxOTsKICBmbG9hdCBpbnZfeiA9IDEuMCAvIG1heChwLnosIDEuMGUtNSk7CiAgdmVjMiBuZGMgPSB2ZWMyKAogICAgcC54ICogaW52X3ogLyAoYXNwZWN0ICogdGFuX2hhbGZfZm92eSksCiAgICBwLnkgKiBpbnZfeiAvIHRhbl9oYWxmX2ZvdnkpOwogIHJldHVybiB2ZWMyKG5kYy54ICogMC41ICsgMC41LCAwLjUgLSBuZGMueSAqIDAuNSk7Cn0KCml2ZWMyIGNoaW1lcmFfY29vcmRfZnJvbV91dih2ZWMyIHV2KSB7CiAgdmVjMiBweCA9IHZlYzIoc3JjX29mZnNldCkgKyB1diAqIHZlYzIoc3JjX2V4dGVudCk7CiAgaXZlYzIgYyA9IGl2ZWMyKGZsb29yKHB4KSk7CiAgcmV0dXJuIGNsYW1wKGMsIHNyY19vZmZzZXQsIHNyY19vZmZzZXQgKyBpdmVjMihzcmNfZXh0ZW50KSAtIGl2ZWMyKDEpKTsKfQoKZmxvYXQgY2hpbWVyYV90cmFjZV9vbmUodmVjMyBvcmlnaW4sIHZlYzMgZGlyKSB7CiAgZmxvYXQgYmFzZV9zdGVwID0gbWF4KG9yaWdpbi56ICogMC4wMTgsIDAuMDEpOwogIHZlYzMgcCA9IG9yaWdpbjsKCiAgZm9yIChpbnQgaSA9IDA7IGkgPCAyNDsgaSsrKSB7CiAgICBmbG9hdCBzdGVwX2xlbiA9IGJhc2Vfc3RlcCAqICgxLjAgKyBmbG9hdChpKSAqIDAuMDgpOwogICAgcCArPSBkaXIgKiBzdGVwX2xlbjsKCiAgICBpZiAocC56IDw9IDEuMGUtNCkKICAgICAgcmV0dXJuIDAuMDsKCiAgICB2ZWMyIHV2ID0gY2hpbWVyYV9wcm9qZWN0X3V2KHApOwogICAgaWYgKGFueShsZXNzVGhhbkVxdWFsKHV2LCB2ZWMyKDAuMDAyKSkpIHx8IGFueShncmVhdGVyVGhhbkVxdWFsKHV2LCB2ZWMyKDAuOTk4KSkpKQogICAgICByZXR1cm4gMC4wOwoKICAgIGZsb2F0IHNjZW5lX2QgPSBjaGltZXJhX2RlcHRoX3JhdyhjaGltZXJhX2Nvb3JkX2Zyb21fdXYodXYpKTsKICAgIGlmIChzY2VuZV9kIDw9IDEuMGUtNSkKICAgICAgY29udGludWU7CgogICAgZmxvYXQgc2NlbmVfeiA9IDEuMCAvIHNjZW5lX2Q7CgogICAgLy8gUmV2ZXJzZWQtWiBjcm9zc2luZzogdGhlIHJheSBzYW1wbGUgaGFzIG1vdmVkIGp1c3QgYmVoaW5kIHZpc2libGUgc2NlbmUKICAgIC8vIGdlb21ldHJ5IGF0IHRoaXMgc2NyZWVuIGxvY2F0aW9uLiBMaW1pdCB0aGlja25lc3MgdG8gcmVqZWN0IGxhcmdlCiAgICAvLyBkaXNvY2NsdXNpb24ganVtcHMuCiAgICBmbG9hdCBiZWhpbmQgPSBwLnogLSBzY2VuZV96OwogICAgZmxvYXQgdGhpY2tuZXNzID0gc3RlcF9sZW4gKiAzLjAgKyBwLnogKiAwLjAwMjU7CiAgICBpZiAoYmVoaW5kID4gMC4wICYmIGJlaGluZCA8IHRoaWNrbmVzcykKICAgICAgcmV0dXJuIDEuMDsKICB9CgogIHJldHVybiAwLjA7Cn0KCmZsb2F0IGNoaW1lcmFfZ2lfaGl0X2ZyYWN0aW9uKGl2ZWMyIGRpc3BsYXlfY29vcmQpIHsKICBmbG9hdCBkID0gY2hpbWVyYV9kZXB0aF9yYXcoZGlzcGxheV9jb29yZCk7CiAgaWYgKGQgPD0gMS4wZS01KQogICAgcmV0dXJuIDAuMDsKCiAgdmVjMyBwID0gY2hpbWVyYV92aWV3X3BvcyhkaXNwbGF5X2Nvb3JkLCBkKTsKICB2ZWMzIG4gPSBjaGltZXJhX2RlcHRoX25vcm1hbChkaXNwbGF5X2Nvb3JkKTsKCiAgLy8gTWFrZSB0aGUgZGVyaXZlZCBub3JtYWwgZmFjZSB0aGUgY2FtZXJhIGZvciB0aGUgdmlzaWJsZSBzdXJmYWNlLgogIHZlYzMgdG9fY2FtZXJhID0gbm9ybWFsaXplKC1wKTsKICBpZiAoZG90KG4sIHRvX2NhbWVyYSkgPCAwLjApCiAgICBuID0gLW47CgogIHZlYzMgcmVmX2F4aXMgPSBhYnMobi56KSA8IDAuOTUgPyB2ZWMzKDAuMCwgMC4wLCAxLjApIDogdmVjMygwLjAsIDEuMCwgMC4wKTsKICB2ZWMzIHQgPSBub3JtYWxpemUoY3Jvc3MocmVmX2F4aXMsIG4pKTsKICB2ZWMzIGIgPSBub3JtYWxpemUoY3Jvc3MobiwgdCkpOwoKICAvLyBGb3VyIGRldGVybWluaXN0aWMgaGVtaXNwaGVyZSByYXlzOiB0aGlzIGRlbGliZXJhdGVseSBtYXRjaGVzIHRoZSBldmVudHVhbAogIC8vIHByYWN0aWNhbCBMb3ctbW9kZSByYXkgYnVkZ2V0LiBCcmlnaHQgPSBtb3JlIHJheXMgZm91bmQgc2NyZWVuLXNwYWNlIGhpdHMuCiAgY29uc3QgZmxvYXQgdGFuZ2VudF93ID0gMC44MjsKICBjb25zdCBmbG9hdCBub3JtYWxfdyA9IDAuNTc7CiAgdmVjMyBvcmlnaW4gPSBwICsgbiAqIG1heChwLnogKiAwLjAwMywgMC4wMDUpOwoKICBmbG9hdCBoaXRzID0gMC4wOwogIGhpdHMgKz0gY2hpbWVyYV90cmFjZV9vbmUob3JpZ2luLCBub3JtYWxpemUobiAqIG5vcm1hbF93ICsgdCAqIHRhbmdlbnRfdykpOwogIGhpdHMgKz0gY2hpbWVyYV90cmFjZV9vbmUob3JpZ2luLCBub3JtYWxpemUobiAqIG5vcm1hbF93IC0gdCAqIHRhbmdlbnRfdykpOwogIGhpdHMgKz0gY2hpbWVyYV90cmFjZV9vbmUob3JpZ2luLCBub3JtYWxpemUobiAqIG5vcm1hbF93ICsgYiAqIHRhbmdlbnRfdykpOwogIGhpdHMgKz0gY2hpbWVyYV90cmFjZV9vbmUob3JpZ2luLCBub3JtYWxpemUobiAqIG5vcm1hbF93IC0gYiAqIHRhbmdlbnRfdykpOwoKICByZXR1cm4gaGl0cyAqIDAuMjU7Cn0KJycnCmlmIGFuY2hvciBub3QgaW4gczoKICAgIHJhaXNlIFN5c3RlbUV4aXQoJ3ByZXNlbnRfY29tbW9uIGJsZW5kIGFuY2hvciBtaXNzaW5nJykKcyA9IHMucmVwbGFjZShhbmNob3IsIGhlbHBlciArIGFuY2hvciwgMSkKcC53cml0ZV90ZXh0KHMsIGVuY29kaW5nPSd1dGYtOCcpCgpmb3IgbmFtZSBpbiAoJ3NyYy9keHZrL3NoYWRlcnMvZHh2a19wcmVzZW50X2ZyYWcuZnJhZycsCiAgICAgICAgICAgICAnc3JjL2R4dmsvc2hhZGVycy9keHZrX3ByZXNlbnRfZnJhZ19ibGl0LmZyYWcnKToKICAgIHAgPSBQYXRoKG5hbWUpCiAgICBzID0gcC5yZWFkX3RleHQoZW5jb2Rpbmc9J3V0Zi04JykKCiAgICBvbGQgPSAnJycgICAgdmVjMyBub3JtYWxfdnMgPSBjaGltZXJhX2RlcHRoX25vcm1hbChjb29yZCk7CiAgICBvX2NvbG9yID0gdmVjNChub3JtYWxfdnMgKiAwLjUgKyAwLjUsIDEuMCk7CiAgICByZXR1cm47CicnJwogICAgaWYgb2xkIGluIHM6CiAgICAgICAgbmV3ID0gJycnICAgIGZsb2F0IGhpdF9mcmFjdGlvbiA9IGNoaW1lcmFfZ2lfaGl0X2ZyYWN0aW9uKGNvb3JkKTsKICAgIG9fY29sb3IgPSB2ZWM0KHZlYzMoaGl0X2ZyYWN0aW9uKSwgMS4wKTsKICAgIHJldHVybjsKJycnCiAgICAgICAgcyA9IHMucmVwbGFjZShvbGQsIG5ldywgMSkKICAgIGVsc2U6CiAgICAgICAgb2xkX2JsaXQgPSAnJycgICAgaXZlYzIgZGlzcGxheV9jb29yZCA9IGl2ZWMyKGZsb29yKHZlYzIoc3JjX29mZnNldCkgKyB2ZWMyKHNyY19leHRlbnQpICogaV9jb29yZCkpOwogICAgZGlzcGxheV9jb29yZCA9IGNsYW1wKGRpc3BsYXlfY29vcmQsIHNyY19vZmZzZXQsIHNyY19vZmZzZXQgKyBpdmVjMihzcmNfZXh0ZW50KSAtIGl2ZWMyKDEpKTsKICAgIHZlYzMgbm9ybWFsX3ZzID0gY2hpbWVyYV9kZXB0aF9ub3JtYWwoZGlzcGxheV9jb29yZCk7CiAgICBvX2NvbG9yID0gdmVjNChub3JtYWxfdnMgKiAwLjUgKyAwLjUsIDEuMCk7CiAgICByZXR1cm47CicnJwogICAgICAgIGlmIG9sZF9ibGl0IG5vdCBpbiBzOgogICAgICAgICAgICByYWlzZSBTeXN0ZW1FeGl0KGYnVjcgbm9ybWFsIG91dHB1dCBibG9jayBtaXNzaW5nIGluIHtuYW1lfScpCiAgICAgICAgbmV3X2JsaXQgPSAnJycgICAgaXZlYzIgZGlzcGxheV9jb29yZCA9IGl2ZWMyKGZsb29yKHZlYzIoc3JjX29mZnNldCkgKyB2ZWMyKHNyY19leHRlbnQpICogaV9jb29yZCkpOwogICAgZGlzcGxheV9jb29yZCA9IGNsYW1wKGRpc3BsYXlfY29vcmQsIHNyY19vZmZzZXQsIHNyY19vZmZzZXQgKyBpdmVjMihzcmNfZXh0ZW50KSAtIGl2ZWMyKDEpKTsKICAgIGZsb2F0IGhpdF9mcmFjdGlvbiA9IGNoaW1lcmFfZ2lfaGl0X2ZyYWN0aW9uKGRpc3BsYXlfY29vcmQpOwogICAgb19jb2xvciA9IHZlYzQodmVjMyhoaXRfZnJhY3Rpb24pLCAxLjApOwogICAgcmV0dXJuOwonJycKICAgICAgICBzID0gcy5yZXBsYWNlKG9sZF9ibGl0LCBuZXdfYmxpdCwgMSkKCiAgICBwLndyaXRlX3RleHQocywgZW5jb2Rpbmc9J3V0Zi04JykKCnByaW50KCdDSElNRVJBX0dJX0hJVFNfVjkgcGF0Y2g6IFBBU1MnKQo=' | base64 -d > /tmp/chimera_v9_patch.py
+          python3 /tmp/chimera_v9_patch.py
+          grep -n 'CHIMERA_GI_HITS_V9' src/d3d11/d3d11_context.cpp
+          grep -n 'chimera_gi_hit_fraction' src/dxvk/shaders/dxvk_present_common.glsl
+          grep -n 'hit_fraction' src/dxvk/shaders/dxvk_present_frag.frag
+          grep -n 'hit_fraction' src/dxvk/shaders/dxvk_present_frag_blit.frag
+
+      - name: Build DXVK x64 and x32
+        working-directory: dxvk
+        run: |
+          export VERSION_NAME="chimera-dxvk-gi-hits-v9"
+          ./package-release.sh "$VERSION_NAME" build --no-package
+
+      - name: Verify and package runtime
+        working-directory: dxvk
+        run: |
+          set -euxo pipefail
+          root="build/dxvk-chimera-dxvk-gi-hits-v9"
+          test -f "$root/x64/d3d11.dll"
+          test -f "$root/x64/dxgi.dll"
+          test -f "$root/x32/d3d11.dll"
+          test -f "$root/x32/dxgi.dll"
+          python3 - <<'PYIN'
+          from pathlib import Path
+          p = Path('build/dxvk-chimera-dxvk-gi-hits-v9/x64/d3d11.dll')
+          data = p.read_bytes()
+          for marker in (b'CHIMERA_DXVK_PROBE_V1', b'CHIMERA_DSV_CREATE_V1', b'CHIMERA_PROJECTION_V8', b'CHIMERA_GI_HITS_V9'):
+              if marker not in data:
+                  raise SystemExit(f'Missing binary marker: {marker!r}')
+          print('V9 runtime marker verification: PASS')
+          PYIN
+          mkdir -p ../runtime_bundle
+          cp "$root/x64/d3d11.dll" ../runtime_bundle/d3d11_64.dll
+          cp "$root/x64/dxgi.dll"  ../runtime_bundle/dxgi_64.dll
+          cp "$root/x32/d3d11.dll" ../runtime_bundle/d3d11_32.dll
+          cp "$root/x32/dxgi.dll"  ../runtime_bundle/dxgi_32.dll
+          cp LICENSE ../runtime_bundle/DXVK-LICENSE
+          sha256sum ../runtime_bundle/*.dll
+
+      - name: Upload DXVK runtime
+        uses: actions/upload-artifact@v7
+        with:
+          name: chimera-dxvk-gi-hits-v9-runtime
+          path: runtime_bundle
+          compression-level: 0
+          if-no-files-found: error
