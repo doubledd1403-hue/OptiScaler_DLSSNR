@@ -1,0 +1,118 @@
+name: Chimera DXVK Projection Probe v8 FIX
+
+on:
+  push:
+    branches:
+      - chimera-amd-nr
+    paths:
+      - '.github/workflows/chimera_dxvk_projection_probe_v8_fix.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-dxvk:
+    name: Build DXVK projection-matrix probe FIX
+    runs-on: ubuntu-latest
+    container: archlinux/archlinux:base-devel
+
+    steps:
+      - name: Install build dependencies
+        run: pacman -Syu --needed --noconfirm git meson mingw-w64-gcc glslang python python-yaml
+
+      - name: Clone Chimera source and pinned DXVK
+        run: |
+          git clone --branch chimera-amd-nr --single-branch https://github.com/doubledd1403-hue/OptiScaler_DLSSNR.git chimera-source
+          git clone https://github.com/doitsujin/dxvk.git dxvk
+          cd dxvk
+          git checkout d7ac2580aa274a14a500e74edbe4ec6aae250e4a
+          git submodule update --init --recursive
+
+      - name: Reuse V1 renderer heartbeat probe
+        run: |
+          python3 - <<'PYIN'
+          import yaml
+          from pathlib import Path
+          wf = yaml.safe_load(Path('chimera-source/.github/workflows/chimera_dxvk_probe_v1.yml').read_text())
+          step = next(s for s in wf['jobs']['build-dxvk']['steps'] if s.get('name') == 'Add Chimera DXVK depth probe')
+          Path('/tmp/chimera_v1.sh').write_text(step['run'])
+          PYIN
+          cd dxvk
+          bash /tmp/chimera_v1.sh
+
+      - name: Reuse V2 heartbeat expansion
+        run: |
+          python3 - <<'PYIN'
+          import yaml
+          from pathlib import Path
+          wf = yaml.safe_load(Path('chimera-source/.github/workflows/chimera_dxvk_probe_v2_fix.yml').read_text())
+          step = next(s for s in wf['jobs']['build-dxvk']['steps'] if s.get('name') == 'Expand probe heartbeat and DSV capture paths')
+          Path('/tmp/chimera_v2.sh').write_text(step['run'])
+          PYIN
+          cd dxvk
+          bash /tmp/chimera_v2.sh
+
+      - name: Reuse V4 CreateDepthStencilView enumeration
+        run: |
+          python3 - <<'PYIN'
+          import yaml
+          from pathlib import Path
+          wf = yaml.safe_load(Path('chimera-source/.github/workflows/chimera_dxvk_depth_create_v4.yml').read_text())
+          step = next(s for s in wf['jobs']['build-dxvk']['steps'] if s.get('name') == 'Add CreateDepthStencilView enumeration')
+          Path('/tmp/chimera_v4.sh').write_text(step['run'])
+          PYIN
+          cd dxvk
+          bash /tmp/chimera_v4.sh
+
+      - name: Reuse V8 projection probe patch
+        run: |
+          python3 - <<'PYIN'
+          import yaml
+          from pathlib import Path
+          wf = yaml.safe_load(Path('chimera-source/.github/workflows/chimera_dxvk_projection_probe_v8.yml').read_text())
+          step = next(s for s in wf['jobs']['build-dxvk']['steps'] if s.get('name') == 'Add V8 vertex constant-buffer projection probe')
+          Path('/tmp/chimera_v8.sh').write_text(step['run'])
+          PYIN
+          cd dxvk
+          bash /tmp/chimera_v8.sh
+
+      - name: Build DXVK x64 and x32
+        working-directory: dxvk
+        run: |
+          export VERSION_NAME="chimera-dxvk-projection-probe-v8-fix"
+          ./package-release.sh "$VERSION_NAME" build --no-package
+
+      - name: Verify and package runtime
+        working-directory: dxvk
+        run: |
+          set -euxo pipefail
+          root="build/dxvk-chimera-dxvk-projection-probe-v8-fix"
+          test -f "$root/x64/d3d11.dll"
+          test -f "$root/x64/dxgi.dll"
+          test -f "$root/x32/d3d11.dll"
+          test -f "$root/x32/dxgi.dll"
+          python3 - <<'PYIN'
+          from pathlib import Path
+          p = Path('build/dxvk-chimera-dxvk-projection-probe-v8-fix/x64/d3d11.dll')
+          data = p.read_bytes()
+          for marker in (b'CHIMERA_DXVK_PROBE_V1', b'CHIMERA_DSV_CREATE_V1', b'CHIMERA_PROJECTION_V8'):
+              if marker not in data:
+                  raise SystemExit(f'Missing binary marker: {marker!r}')
+          print('V8 FIX runtime marker verification: PASS')
+          PYIN
+          mkdir -p ../runtime_bundle
+          cp "$root/x64/d3d11.dll" ../runtime_bundle/d3d11_64.dll
+          cp "$root/x64/dxgi.dll"  ../runtime_bundle/dxgi_64.dll
+          cp "$root/x32/d3d11.dll" ../runtime_bundle/d3d11_32.dll
+          cp "$root/x32/dxgi.dll"  ../runtime_bundle/dxgi_32.dll
+          cp LICENSE ../runtime_bundle/DXVK-LICENSE
+          sha256sum ../runtime_bundle/*.dll
+
+      - name: Upload DXVK runtime
+        uses: actions/upload-artifact@v7
+        with:
+          name: chimera-dxvk-projection-probe-v8-runtime
+          path: runtime_bundle
+          compression-level: 0
+          if-no-files-found: error
