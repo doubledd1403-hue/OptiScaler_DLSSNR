@@ -1,0 +1,108 @@
+name: Chimera DXVK Lighting Cleanup v10.1 FIX
+
+on:
+  push:
+    branches:
+      - chimera-amd-nr
+    paths:
+      - '.github/workflows/chimera_dxvk_lighting_v10_1_fix.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-dxvk:
+    name: Build Chimera Lighting contact/AO cleanup FIX
+    runs-on: ubuntu-latest
+    container: archlinux/archlinux:base-devel
+
+    steps:
+      - name: Install build dependencies
+        run: pacman -Syu --needed --noconfirm git meson mingw-w64-gcc glslang python python-yaml
+
+      - name: Clone Chimera source and pinned DXVK
+        run: |
+          git clone --branch chimera-amd-nr --single-branch https://github.com/doubledd1403-hue/OptiScaler_DLSSNR.git chimera-source
+          git clone https://github.com/doitsujin/dxvk.git dxvk
+          cd dxvk
+          git checkout d7ac2580aa274a14a500e74edbe4ec6aae250e4a
+          git submodule update --init --recursive
+
+      - name: Prepare inherited Chimera patches
+        run: |
+          python3 - <<'PYIN'
+          import yaml
+          from pathlib import Path
+
+          steps = [
+            ('.github/workflows/chimera_dxvk_probe_v1.yml', 'Add Chimera DXVK depth probe'),
+            ('.github/workflows/chimera_dxvk_probe_v2_fix.yml', 'Expand probe heartbeat and DSV capture paths'),
+            ('.github/workflows/chimera_dxvk_depth_create_v4.yml', 'Add CreateDepthStencilView enumeration'),
+            ('.github/workflows/chimera_dxvk_raw_depth_v5.yml', 'Add renderer-side raw depth presentation'),
+            ('.github/workflows/chimera_dxvk_normals_v7.yml', 'Add V6 upright grayscale depth decoder'),
+            ('.github/workflows/chimera_dxvk_normals_v7.yml', 'Add V7 depth-derived normal reconstruction'),
+            ('.github/workflows/chimera_dxvk_projection_probe_v8.yml', 'Add V8 vertex constant-buffer projection probe'),
+            ('.github/workflows/chimera_dxvk_gi_hits_v9_fix.yml', 'Add V9 exact-projection screen-space ray hits'),
+            ('.github/workflows/chimera_dxvk_lighting_v10.yml', 'Add V10 colour + depth dual binding and live Lighting controls'),
+            ('.github/workflows/chimera_dxvk_lighting_v10_1.yml', 'Add V10.1 contact artifact cleanup'),
+          ]
+
+          for i, (path, name) in enumerate(steps, 1):
+              wf = yaml.safe_load(Path('chimera-source', path).read_text())
+              job = next(iter(wf['jobs'].values()))
+              step = next(s for s in job['steps'] if s.get('name') == name)
+              Path(f'/tmp/chimera_patch_{i:02d}.sh').write_text(step['run'])
+              print(f'Prepared {i:02d}: {name}')
+          PYIN
+
+      - name: Apply V1 through V10.1 patches
+        working-directory: dxvk
+        run: |
+          set -eux
+          for f in /tmp/chimera_patch_*.sh; do
+            echo "==> $f"
+            bash "$f"
+          done
+          grep -n 'CHIMERA_LIGHTING_V10_1' src/dxvk/shaders/dxvk_present_common.glsl
+          grep -n 'chimera_trace_contact_v101' src/dxvk/shaders/dxvk_present_common.glsl
+
+      - name: Build DXVK x64 and x32
+        working-directory: dxvk
+        run: |
+          export VERSION_NAME="chimera-dxvk-lighting-v10-1"
+          ./package-release.sh "$VERSION_NAME" build --no-package
+
+      - name: Verify and package runtime
+        working-directory: dxvk
+        run: |
+          set -euxo pipefail
+          root="build/dxvk-chimera-dxvk-lighting-v10-1"
+          test -f "$root/x64/d3d11.dll"
+          test -f "$root/x64/dxgi.dll"
+          test -f "$root/x32/d3d11.dll"
+          test -f "$root/x32/dxgi.dll"
+          python3 - <<'PYIN'
+          from pathlib import Path
+          p = Path('build/dxvk-chimera-dxvk-lighting-v10-1/x64/d3d11.dll')
+          data = p.read_bytes()
+          for marker in (b'CHIMERA_DXVK_PROBE_V1', b'CHIMERA_DSV_CREATE_V1', b'CHIMERA_PROJECTION_V8'):
+              if marker not in data:
+                  raise SystemExit(f'Missing retained binary marker: {marker!r}')
+          print('V10.1 retained runtime marker verification: PASS')
+          PYIN
+          mkdir -p ../runtime_bundle
+          cp "$root/x64/d3d11.dll" ../runtime_bundle/d3d11_64.dll
+          cp "$root/x64/dxgi.dll"  ../runtime_bundle/dxgi_64.dll
+          cp "$root/x32/d3d11.dll" ../runtime_bundle/d3d11_32.dll
+          cp "$root/x32/dxgi.dll"  ../runtime_bundle/dxgi_32.dll
+          cp LICENSE ../runtime_bundle/DXVK-LICENSE
+          sha256sum ../runtime_bundle/*.dll
+
+      - name: Upload DXVK runtime
+        uses: actions/upload-artifact@v7
+        with:
+          name: chimera-dxvk-lighting-v10-1-runtime
+          path: runtime_bundle
+          compression-level: 0
+          if-no-files-found: error
