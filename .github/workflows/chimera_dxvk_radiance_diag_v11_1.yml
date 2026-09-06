@@ -1,0 +1,113 @@
+name: Chimera DXVK V11.1 Radiance Diagnostics
+
+on:
+  push:
+    branches:
+      - chimera-amd-nr
+    paths:
+      - '.github/workflows/chimera_dxvk_radiance_diag_v11_1.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-dxvk:
+    name: Build Chimera V11.1 radiance diagnostics
+    runs-on: ubuntu-latest
+    container: archlinux/archlinux:base-devel
+
+    steps:
+      - name: Install build dependencies
+        run: pacman -Syu --needed --noconfirm git meson mingw-w64-gcc glslang python python-yaml
+
+      - name: Clone Chimera source and pinned DXVK
+        run: |
+          git clone --branch chimera-amd-nr --single-branch https://github.com/doubledd1403-hue/OptiScaler_DLSSNR.git chimera-source
+          git clone https://github.com/doitsujin/dxvk.git dxvk
+          cd dxvk
+          git checkout d7ac2580aa274a14a500e74edbe4ec6aae250e4a
+          git submodule update --init --recursive
+
+      - name: Prepare inherited V1 through V10.1 patches
+        run: |
+          python3 - <<'PYIN'
+          import yaml
+          from pathlib import Path
+
+          wf = yaml.safe_load(Path('chimera-source/.github/workflows/chimera_dxvk_indirect_colour_v11.yml').read_text())
+          job = next(iter(wf['jobs'].values()))
+          prep = next(s for s in job['steps'] if s.get('name') == 'Prepare inherited Chimera patches')
+          Path('/tmp/chimera_prepare.sh').write_text(prep['run'])
+          PYIN
+          bash /tmp/chimera_prepare.sh
+
+      - name: Apply V1 through V10.1 patches
+        working-directory: dxvk
+        run: |
+          set -eux
+          for f in /tmp/chimera_patch_*.sh; do
+            echo "==> $f"
+            bash "$f"
+          done
+
+      - name: Reuse V11 hit-UV indirect colour
+        run: |
+          python3 - <<'PYIN'
+          import yaml
+          from pathlib import Path
+          wf = yaml.safe_load(Path('chimera-source/.github/workflows/chimera_dxvk_indirect_colour_v11.yml').read_text())
+          job = next(iter(wf['jobs'].values()))
+          step = next(s for s in job['steps'] if s.get('name') == 'Add V11 hit-UV indirect colour')
+          Path('/tmp/chimera_v11.sh').write_text(step['run'])
+          PYIN
+          cd dxvk
+          bash /tmp/chimera_v11.sh
+
+      - name: Add V11.1 zero-rays and radiance diagnostics
+        working-directory: dxvk
+        run: |
+          echo 'ZnJvbSBwYXRobGliIGltcG9ydCBQYXRoCgojIC0tLS0gUnVudGltZSBjb25maWcgLyBwdXNoIGNvbnN0YW50cyAtLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tCnAgPSBQYXRoKCdzcmMvZHh2ay9keHZrX3N3YXBjaGFpbl9ibGl0dGVyLmNwcCcpCnMgPSBwLnJlYWRfdGV4dChlbmNvZGluZz0ndXRmLTgnKQoKb2xkID0gJycnICBzdHJ1Y3QgQ2hpbWVyYUxpZ2h0aW5nUnVudGltZVNldHRpbmdzIHsKICAgIGZsb2F0IGludGVuc2l0eSA9IDAuNTBmOwogICAgdWludDMyX3QgcmF5cyA9IDR1OwogICAgdWludDMyX3QgZW5hYmxlZCA9IDF1OwogIH07JycnCm5ldyA9ICcnJyAgc3RydWN0IENoaW1lcmFMaWdodGluZ1J1bnRpbWVTZXR0aW5ncyB7CiAgICBmbG9hdCBpbnRlbnNpdHkgPSAwLjUwZjsKICAgIHVpbnQzMl90IHJheXMgPSA0dTsKICAgIHVpbnQzMl90IGVuYWJsZWQgPSAxdTsKICAgIHVpbnQzMl90IGRlYnVnTW9kZSA9IDB1OwogIH07JycnCmlmIG9sZCBub3QgaW4gczoKICAgIHJhaXNlIFN5c3RlbUV4aXQoJ1YxMS4xOiBydW50aW1lIHNldHRpbmdzIHN0cnVjdCBhbmNob3IgbWlzc2luZycpCnMgPSBzLnJlcGxhY2Uob2xkLCBuZXcsIDEpCgpvbGQgPSAnJycgICAgICB9IGVsc2UgaWYgKGxpbmUucmZpbmQoInJheXM9IiwgMCkgPT0gMCkgewogICAgICAgIHVuc2lnbmVkIGxvbmcgdiA9IHN0ZDo6c3RydG91bChsaW5lLmNfc3RyKCkgKyA1LCBudWxscHRyLCAxMCk7CiAgICAgICAgc2V0dGluZ3MucmF5cyA9IHYgPj0gMTZ1ID8gMTZ1IDogKHYgPj0gOHUgPyA4dSA6IDR1KTsKICAgICAgfScnJwpuZXcgPSAnJycgICAgICB9IGVsc2UgaWYgKGxpbmUucmZpbmQoInJheXM9IiwgMCkgPT0gMCkgewogICAgICAgIHVuc2lnbmVkIGxvbmcgdiA9IHN0ZDo6c3RydG91bChsaW5lLmNfc3RyKCkgKyA1LCBudWxscHRyLCAxMCk7CiAgICAgICAgc2V0dGluZ3MucmF5cyA9IHYgPT0gMHUgPyAwdSA6ICh2ID49IDE2dSA/IDE2dSA6ICh2ID49IDh1ID8gOHUgOiA0dSkpOwogICAgICB9IGVsc2UgaWYgKGxpbmUucmZpbmQoImRlYnVnPSIsIDApID09IDApIHsKICAgICAgICB1bnNpZ25lZCBsb25nIHYgPSBzdGQ6OnN0cnRvdWwobGluZS5jX3N0cigpICsgNiwgbnVsbHB0ciwgMTApOwogICAgICAgIHNldHRpbmdzLmRlYnVnTW9kZSA9IHYgPj0gMnUgPyAydSA6ICh2ID49IDF1ID8gMXUgOiAwdSk7CiAgICAgIH0nJycKaWYgb2xkIG5vdCBpbiBzOgogICAgcmFpc2UgU3lzdGVtRXhpdCgnVjExLjE6IHJheXMgcGFyc2VyIGFuY2hvciBtaXNzaW5nJykKcyA9IHMucmVwbGFjZShvbGQsIG5ldywgMSkKCm9sZCA9ICcgICAgYXJncy5jaGltZXJhUGFkID0gMHU7JwpuZXcgPSAnICAgIGFyZ3MuY2hpbWVyYVBhZCA9IGNoaW1lcmFTZXR0aW5ncy5kZWJ1Z01vZGU7JwppZiBvbGQgbm90IGluIHM6CiAgICByYWlzZSBTeXN0ZW1FeGl0KCdWMTEuMTogZGVidWcgcHVzaCBhc3NpZ25tZW50IGFuY2hvciBtaXNzaW5nJykKcyA9IHMucmVwbGFjZShvbGQsIG5ldywgMSkKCnAud3JpdGVfdGV4dChzLCBlbmNvZGluZz0ndXRmLTgnKQoKIyAtLS0tIFNoYWRlciBkaWFnbm9zdGljcyAtLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLQpwID0gUGF0aCgnc3JjL2R4dmsvc2hhZGVycy9keHZrX3ByZXNlbnRfY29tbW9uLmdsc2wnKQpzID0gcC5yZWFkX3RleHQoZW5jb2Rpbmc9J3V0Zi04JykKCm9sZCA9ICcgIHVpbnQgY2hpbWVyYV9wYWQ7JwpuZXcgPSAnICB1aW50IGNoaW1lcmFfZGVidWdfbW9kZTsnCmlmIG9sZCBub3QgaW4gczoKICAgIHJhaXNlIFN5c3RlbUV4aXQoJ1YxMS4xOiBzaGFkZXIgcHVzaCBjb25zdGFudCBhbmNob3IgbWlzc2luZycpCnMgPSBzLnJlcGxhY2Uob2xkLCBuZXcsIDEpCgpvbGQgPSAnJycgIGlmIChjaGltZXJhX2VuYWJsZWQgPT0gMHUgfHwKICAgICAgY2hpbWVyYV9kZXB0aF9leHRlbnQueCA8PSAwIHx8CiAgICAgIGNoaW1lcmFfZGVwdGhfZXh0ZW50LnkgPD0gMCB8fAogICAgICB1c2VyX3N0cmVuZ3RoIDw9IDAuMDAxKQogICAgcmV0dXJuIGNvbG9yOycnJwpuZXcgPSAnJycgIGlmIChjaGltZXJhX2VuYWJsZWQgPT0gMHUgfHwKICAgICAgY2hpbWVyYV9kZXB0aF9leHRlbnQueCA8PSAwIHx8CiAgICAgIGNoaW1lcmFfZGVwdGhfZXh0ZW50LnkgPD0gMCB8fAogICAgICBjaGltZXJhX3JheXMgPT0gMHUgfHwKICAgICAgdXNlcl9zdHJlbmd0aCA8PSAwLjAwMSkKICAgIHJldHVybiBjb2xvcjsnJycKaWYgb2xkIG5vdCBpbiBzOgogICAgcmFpc2UgU3lzdGVtRXhpdCgnVjExLjE6IFYxMSBlYXJseS1yZXR1cm4gYW5jaG9yIG1pc3NpbmcnKQpzID0gcy5yZXBsYWNlKG9sZCwgbmV3LCAxKQoKb2xkID0gJycnICBmbG9hdCBjb3ZlcmFnZSA9IGNsYW1wKAogICAgaGl0X3dlaWdodF9zdW0gLyBmbG9hdChyZXF1ZXN0ZWQpLCAwLjAsIDEuMCk7CgogIGZsb2F0IGFvID0gc21vb3Roc3RlcCgwLjA2LCAwLjU4LCBjb3ZlcmFnZSk7CiAgY29sb3IucmdiICo9IDEuMCAtIHVzZXJfc3RyZW5ndGggKiAwLjEwICogYW87CgogIGlmIChoaXRfd2VpZ2h0X3N1bSA+IDEuMGUtNSkgewogICAgdmVjMyBhdmVyYWdlX2hpdCA9IGluZGlyZWN0X3N1bSAvIGhpdF93ZWlnaHRfc3VtOwogICAgYXZlcmFnZV9oaXQgPSBtaW4oYXZlcmFnZV9oaXQsIHZlYzMoMi4wKSk7CgogICAgdmVjMyBib3VuY2UgPSBhdmVyYWdlX2hpdCAqIGNvdmVyYWdlOwogICAgY29sb3IucmdiICs9IGJvdW5jZSAqICgwLjIyICogdXNlcl9zdHJlbmd0aCk7CiAgfQoKICByZXR1cm4gY29sb3I7JycnCm5ldyA9ICcnJyAgZmxvYXQgY292ZXJhZ2UgPSBjbGFtcCgKICAgIGhpdF93ZWlnaHRfc3VtIC8gZmxvYXQocmVxdWVzdGVkKSwgMC4wLCAxLjApOwoKICB2ZWMzIGF2ZXJhZ2VfaGl0ID0gdmVjMygwLjApOwogIGlmIChoaXRfd2VpZ2h0X3N1bSA+IDEuMGUtNSkKICAgIGF2ZXJhZ2VfaGl0ID0gbWluKGluZGlyZWN0X3N1bSAvIGhpdF93ZWlnaHRfc3VtLCB2ZWMzKDIuMCkpOwoKICAvLyBEaWFnbm9zdGljIDE6IHNob3cgb25seSBhY2NlcHRlZCByYXktaGl0IGNvdmVyYWdlLgogIGlmIChjaGltZXJhX2RlYnVnX21vZGUgPT0gMXUpCiAgICByZXR1cm4gdmVjNCh2ZWMzKGNvdmVyYWdlKSwgMS4wKTsKCiAgLy8gRGlhZ25vc3RpYyAyOiBzaG93IHRoZSBhY3R1YWwgY29sb3VyIHNhbXBsZWQgYXQgYWNjZXB0ZWQgaGl0IFVWcy4KICAvLyBCbGFjayBtZWFucyB0aGVyZSB3ZXJlIG5vIGFjY2VwdGVkIGhpdHMgZm9yIHRoYXQgcGl4ZWwuCiAgaWYgKGNoaW1lcmFfZGVidWdfbW9kZSA9PSAydSkKICAgIHJldHVybiB2ZWM0KGNsYW1wKGF2ZXJhZ2VfaGl0LCB2ZWMzKDAuMCksIHZlYzMoMS4wKSksIDEuMCk7CgogIGZsb2F0IGFvID0gc21vb3Roc3RlcCgwLjA2LCAwLjU4LCBjb3ZlcmFnZSk7CiAgY29sb3IucmdiICo9IDEuMCAtIHVzZXJfc3RyZW5ndGggKiAwLjEwICogYW87CgogIGlmIChoaXRfd2VpZ2h0X3N1bSA+IDEuMGUtNSkgewogICAgdmVjMyBib3VuY2UgPSBhdmVyYWdlX2hpdCAqIGNvdmVyYWdlOwogICAgY29sb3IucmdiICs9IGJvdW5jZSAqICgwLjIyICogdXNlcl9zdHJlbmd0aCk7CiAgfQoKICByZXR1cm4gY29sb3I7JycnCmlmIG9sZCBub3QgaW4gczoKICAgIHJhaXNlIFN5c3RlbUV4aXQoJ1YxMS4xOiBWMTEgY29tcG9zaXRlIGFuY2hvciBtaXNzaW5nJykKcyA9IHMucmVwbGFjZShvbGQsIG5ldywgMSkKCm1hcmtlciA9ICcvLyBDSElNRVJBX0xJR0hUSU5HX1YxMScKaWYgbWFya2VyIG5vdCBpbiBzOgogICAgcmFpc2UgU3lzdGVtRXhpdCgnVjExLjE6IFYxMSBtYXJrZXIgbWlzc2luZycpCnMgPSBzLnJlcGxhY2UobWFya2VyLCAnLy8gQ0hJTUVSQV9MSUdIVElOR19WMTFfMV9ESUFHTk9TVElDU1xuJyArIG1hcmtlciwgMSkKCnAud3JpdGVfdGV4dChzLCBlbmNvZGluZz0ndXRmLTgnKQoKcHJpbnQoJ0NISU1FUkFfTElHSFRJTkdfVjExXzEgZGlhZ25vc3RpY3MgKyB6ZXJvLXJheXMgcGF0Y2g6IFBBU1MnKQo=' | base64 -d > /tmp/chimera_v11_1_patch.py
+          python3 /tmp/chimera_v11_1_patch.py
+          grep -n 'CHIMERA_LIGHTING_V11_1_DIAGNOSTICS' src/dxvk/shaders/dxvk_present_common.glsl
+          grep -n 'chimera_debug_mode' src/dxvk/shaders/dxvk_present_common.glsl
+
+      - name: Build DXVK x64 and x32
+        working-directory: dxvk
+        run: |
+          export VERSION_NAME="chimera-dxvk-radiance-diag-v11-1"
+          ./package-release.sh "$VERSION_NAME" build --no-package
+
+      - name: Verify and package runtime
+        working-directory: dxvk
+        run: |
+          set -euxo pipefail
+          root="build/dxvk-chimera-dxvk-radiance-diag-v11-1"
+          test -f "$root/x64/d3d11.dll"
+          test -f "$root/x64/dxgi.dll"
+          test -f "$root/x32/d3d11.dll"
+          test -f "$root/x32/dxgi.dll"
+          python3 - <<'PYIN'
+          from pathlib import Path
+          p = Path('build/dxvk-chimera-dxvk-radiance-diag-v11-1/x64/d3d11.dll')
+          data = p.read_bytes()
+          for marker in (b'CHIMERA_DXVK_PROBE_V1', b'CHIMERA_DSV_CREATE_V1', b'CHIMERA_PROJECTION_V8'):
+              if marker not in data:
+                  raise SystemExit(f'Missing retained binary marker: {marker!r}')
+          print('V11.1 retained runtime marker verification: PASS')
+          PYIN
+          mkdir -p ../runtime_bundle
+          cp "$root/x64/d3d11.dll" ../runtime_bundle/d3d11_64.dll
+          cp "$root/x64/dxgi.dll"  ../runtime_bundle/dxgi_64.dll
+          cp "$root/x32/d3d11.dll" ../runtime_bundle/d3d11_32.dll
+          cp "$root/x32/dxgi.dll"  ../runtime_bundle/dxgi_32.dll
+          cp LICENSE ../runtime_bundle/DXVK-LICENSE
+          sha256sum ../runtime_bundle/*.dll
+
+      - name: Upload DXVK runtime
+        uses: actions/upload-artifact@v7
+        with:
+          name: chimera-dxvk-radiance-diag-v11-1-runtime
+          path: runtime_bundle
+          compression-level: 0
+          if-no-files-found: error
