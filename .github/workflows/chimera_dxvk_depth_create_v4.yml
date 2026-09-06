@@ -1,0 +1,104 @@
+name: Chimera DXVK Depth Create Probe v4
+
+on:
+  push:
+    branches:
+      - chimera-amd-nr
+    paths:
+      - '.github/workflows/chimera_dxvk_depth_create_v4.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-dxvk:
+    name: Build DXVK creation-time depth probe
+    runs-on: ubuntu-latest
+    container: archlinux/archlinux:base-devel
+
+    steps:
+      - name: Install build dependencies
+        run: pacman -Syu --needed --noconfirm git meson mingw-w64-gcc glslang python python-yaml
+
+      - name: Clone Chimera source and pinned DXVK
+        run: |
+          git clone --branch chimera-amd-nr --single-branch https://github.com/doubledd1403-hue/OptiScaler_DLSSNR.git chimera-source
+          git clone https://github.com/doitsujin/dxvk.git dxvk
+          cd dxvk
+          git checkout d7ac2580aa274a14a500e74edbe4ec6aae250e4a
+          git submodule update --init --recursive
+
+      - name: Reuse proven V1 DXVK probe patch
+        run: |
+          python3 - <<'PY'
+          import yaml
+          from pathlib import Path
+          wf = yaml.safe_load(Path('chimera-source/.github/workflows/chimera_dxvk_probe_v1.yml').read_text())
+          step = next(s for s in wf['jobs']['build-dxvk']['steps'] if s.get('name') == 'Add Chimera DXVK depth probe')
+          Path('/tmp/chimera_v1.sh').write_text(step['run'])
+          PY
+          cd dxvk
+          bash /tmp/chimera_v1.sh
+
+      - name: Reuse proven V2 heartbeat patch
+        run: |
+          python3 - <<'PY'
+          import yaml
+          from pathlib import Path
+          wf = yaml.safe_load(Path('chimera-source/.github/workflows/chimera_dxvk_probe_v2_fix.yml').read_text())
+          step = next(s for s in wf['jobs']['build-dxvk']['steps'] if s.get('name') == 'Expand probe heartbeat and DSV capture paths')
+          Path('/tmp/chimera_v2.sh').write_text(step['run'])
+          PY
+          cd dxvk
+          bash /tmp/chimera_v2.sh
+
+      - name: Add CreateDepthStencilView enumeration
+        working-directory: dxvk
+        run: |
+          echo 'CmZyb20gcGF0aGxpYiBpbXBvcnQgUGF0aAoKcCA9IFBhdGgoInNyYy9kM2QxMS9kM2QxMV9kZXZpY2UuY3BwIikKcyA9IHAucmVhZF90ZXh0KGVuY29kaW5nPSJ1dGYtOCIpCgppbmNsdWRlX2FuY2hvciA9ICIjaW5jbHVkZSA8Y3N0cmluZz5cbiIKaW5jbHVkZXMgPSAiIiIjaW5jbHVkZSA8d2luZG93cy5oPgojaW5jbHVkZSA8ZmlsZXN5c3RlbT4KI2luY2x1ZGUgPGZzdHJlYW0+CiNpbmNsdWRlIDxtdXRleD4KIiIiCmlmIGluY2x1ZGVfYW5jaG9yIG5vdCBpbiBzOgogICAgcmFpc2UgU3lzdGVtRXhpdCgiQ291bGQgbm90IGxvY2F0ZSBpbmNsdWRlIGFuY2hvciIpCnMgPSBzLnJlcGxhY2UoaW5jbHVkZV9hbmNob3IsIGluY2x1ZGVfYW5jaG9yICsgaW5jbHVkZXMsIDEpCgpuc19hbmNob3IgPSAibmFtZXNwYWNlIGR4dmsge1xuIgpoZWxwZXIgPSByIiIiICBzdGF0aWMgc3RkOjptdXRleCBnX2NoaW1lcmFEc3ZDcmVhdGVNdXRleDsKCiAgc3RhdGljIHZvaWQgY2hpbWVyYUxvZ0RzdkNyZWF0ZSgKICAgICAgICAgIFVJTlQgICAgICAgIHdpZHRoLAogICAgICAgICAgVUlOVCAgICAgICAgaGVpZ2h0LAogICAgICAgICAgRFhHSV9GT1JNQVQgcmVzb3VyY2VGb3JtYXQsCiAgICAgICAgICBEWEdJX0ZPUk1BVCB2aWV3Rm9ybWF0LAogICAgICAgICAgVUlOVCAgICAgICAgc2FtcGxlQ291bnQsCiAgICAgICAgICBVSU5UICAgICAgICBtaXBMZXZlbHMsCiAgICAgICAgICBVSU5UICAgICAgICBhcnJheVNpemUsCiAgICAgICAgICBVSU5UICAgICAgICBiaW5kRmxhZ3MpIHsKICAgIHN0ZDo6bG9ja19ndWFyZDxzdGQ6Om11dGV4PiBsb2NrKGdfY2hpbWVyYURzdkNyZWF0ZU11dGV4KTsKCiAgICB3Y2hhcl90IGV4ZVBhdGhbTUFYX1BBVEhdID0geyB9OwogICAgRFdPUkQgbGVuID0gR2V0TW9kdWxlRmlsZU5hbWVXKG51bGxwdHIsIGV4ZVBhdGgsIE1BWF9QQVRIKTsKICAgIGlmICghbGVuIHx8IGxlbiA+PSBNQVhfUEFUSCkKICAgICAgcmV0dXJuOwoKICAgIHN0ZDo6ZmlsZXN5c3RlbTo6cGF0aCBsb2dQYXRoKGV4ZVBhdGgpOwogICAgbG9nUGF0aC5yZXBsYWNlX2ZpbGVuYW1lKEwiY2hpbWVyYV9keHZrX2RlcHRoX2NyZWF0ZS50eHQiKTsKCiAgICBzdGQ6Om9mc3RyZWFtIG91dChsb2dQYXRoLCBzdGQ6Omlvczo6b3V0IHwgc3RkOjppb3M6OmFwcCk7CiAgICBpZiAoIW91dCkKICAgICAgcmV0dXJuOwoKICAgIG91dCA8PCAiQ0hJTUVSQV9EU1ZfQ1JFQVRFX1YxIgogICAgICAgIDw8ICIsdz0iIDw8IHdpZHRoCiAgICAgICAgPDwgIixoPSIgPDwgaGVpZ2h0CiAgICAgICAgPDwgIixyZXNvdXJjZV9mbXQ9IiA8PCBzdGF0aWNfY2FzdDx1bnNpZ25lZD4ocmVzb3VyY2VGb3JtYXQpCiAgICAgICAgPDwgIix2aWV3X2ZtdD0iIDw8IHN0YXRpY19jYXN0PHVuc2lnbmVkPih2aWV3Rm9ybWF0KQogICAgICAgIDw8ICIsc2FtcGxlcz0iIDw8IHNhbXBsZUNvdW50CiAgICAgICAgPDwgIixtaXBzPSIgPDwgbWlwTGV2ZWxzCiAgICAgICAgPDwgIixhcnJheT0iIDw8IGFycmF5U2l6ZQogICAgICAgIDw8ICIsYmluZD0iIDw8IGJpbmRGbGFncwogICAgICAgIDw8ICJcbiI7CiAgICBvdXQuZmx1c2goKTsKICB9CgoiIiIKaWYgbnNfYW5jaG9yIG5vdCBpbiBzOgogICAgcmFpc2UgU3lzdGVtRXhpdCgiQ291bGQgbm90IGxvY2F0ZSBuYW1lc3BhY2UgYW5jaG9yIikKcyA9IHMucmVwbGFjZShuc19hbmNob3IsIG5zX2FuY2hvciArIGhlbHBlciwgMSkKCmhvb2tfYW5jaG9yID0gJyAgICBpZiAoIUNoZWNrUmVzb3VyY2VWaWV3Q29tcGF0aWJpbGl0eShwUmVzb3VyY2UsIEQzRDExX0JJTkRfREVQVEhfU1RFTkNJTCwgZGVzYy5Gb3JtYXQsIDApKSB7XG4nCmhvb2sgPSByIiIiICAgIElEM0QxMVRleHR1cmUyRCogY2hpbWVyYVRleDJEID0gbnVsbHB0cjsKICAgIGlmIChTVUNDRUVERUQocFJlc291cmNlLT5RdWVyeUludGVyZmFjZSgKICAgICAgICAgIF9fdXVpZG9mKElEM0QxMVRleHR1cmUyRCksCiAgICAgICAgICByZWludGVycHJldF9jYXN0PHZvaWQqKj4oJmNoaW1lcmFUZXgyRCkpKSAmJiBjaGltZXJhVGV4MkQpIHsKICAgICAgRDNEMTFfVEVYVFVSRTJEX0RFU0MgY2hpbWVyYURlc2MgPSB7IH07CiAgICAgIGNoaW1lcmFUZXgyRC0+R2V0RGVzYygmY2hpbWVyYURlc2MpOwogICAgICBjaGltZXJhTG9nRHN2Q3JlYXRlKAogICAgICAgIGNoaW1lcmFEZXNjLldpZHRoLAogICAgICAgIGNoaW1lcmFEZXNjLkhlaWdodCwKICAgICAgICBjaGltZXJhRGVzYy5Gb3JtYXQsCiAgICAgICAgZGVzYy5Gb3JtYXQsCiAgICAgICAgY2hpbWVyYURlc2MuU2FtcGxlRGVzYy5Db3VudCwKICAgICAgICBjaGltZXJhRGVzYy5NaXBMZXZlbHMsCiAgICAgICAgY2hpbWVyYURlc2MuQXJyYXlTaXplLAogICAgICAgIGNoaW1lcmFEZXNjLkJpbmRGbGFncyk7CiAgICAgIGNoaW1lcmFUZXgyRC0+UmVsZWFzZSgpOwogICAgfQoKIiIiCmlmIGhvb2tfYW5jaG9yIG5vdCBpbiBzOgogICAgcmFpc2UgU3lzdGVtRXhpdCgiQ291bGQgbm90IGxvY2F0ZSBDcmVhdGVEZXB0aFN0ZW5jaWxWaWV3IGNvbXBhdGliaWxpdHkgYW5jaG9yIikKcyA9IHMucmVwbGFjZShob29rX2FuY2hvciwgaG9vayArIGhvb2tfYW5jaG9yLCAxKQoKcC53cml0ZV90ZXh0KHMsIGVuY29kaW5nPSJ1dGYtOCIpCgppZiAiQ0hJTUVSQV9EU1ZfQ1JFQVRFX1YxIiBub3QgaW4gczoKICAgIHJhaXNlIFN5c3RlbUV4aXQoIkNyZWF0aW9uIG1hcmtlciBtaXNzaW5nIGFmdGVyIHBhdGNoIikKaWYgcy5jb3VudCgiY2hpbWVyYUxvZ0RzdkNyZWF0ZSgiKSAhPSAyOgogICAgcmFpc2UgU3lzdGVtRXhpdCgiRXhwZWN0ZWQgaGVscGVyIHBsdXMgb25lIENyZWF0ZURlcHRoU3RlbmNpbFZpZXcgY2FsbCIpCgpwcmludCgiQ3JlYXRlRGVwdGhTdGVuY2lsVmlldyBjcmVhdGlvbiBwcm9iZSBwYXRjaDogUEFTUyIpCg==' | base64 -d > /tmp/chimera_depth_create.py
+          python3 /tmp/chimera_depth_create.py
+          grep -n 'CHIMERA_DSV_CREATE_V1' src/d3d11/d3d11_device.cpp
+          grep -n 'chimeraLogDsvCreate' src/d3d11/d3d11_device.cpp
+
+      - name: Build DXVK x64 and x32
+        working-directory: dxvk
+        run: |
+          export VERSION_NAME="chimera-dxvk-depth-create-v4"
+          ./package-release.sh "$VERSION_NAME" build --no-package
+
+      - name: Verify and package runtime
+        working-directory: dxvk
+        run: |
+          set -euxo pipefail
+          root="build/dxvk-chimera-dxvk-depth-create-v4"
+          test -f "$root/x64/d3d11.dll"
+          test -f "$root/x64/dxgi.dll"
+          test -f "$root/x32/d3d11.dll"
+          test -f "$root/x32/dxgi.dll"
+
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('build/dxvk-chimera-dxvk-depth-create-v4/x64/d3d11.dll')
+          data = p.read_bytes()
+          for marker in (b'CHIMERA_DXVK_PROBE_V1', b'CHIMERA_DSV_CREATE_V1'):
+              if marker not in data:
+                  raise SystemExit(f'Missing binary marker: {marker!r}')
+          print('Binary marker verification: PASS')
+          PY
+
+          mkdir -p ../runtime_bundle
+          cp "$root/x64/d3d11.dll" ../runtime_bundle/d3d11_64.dll
+          cp "$root/x64/dxgi.dll"  ../runtime_bundle/dxgi_64.dll
+          cp "$root/x32/d3d11.dll" ../runtime_bundle/d3d11_32.dll
+          cp "$root/x32/dxgi.dll"  ../runtime_bundle/dxgi_32.dll
+          cp LICENSE ../runtime_bundle/DXVK-LICENSE
+          sha256sum ../runtime_bundle/*.dll
+
+      - name: Upload DXVK runtime
+        uses: actions/upload-artifact@v7
+        with:
+          name: chimera-dxvk-depth-create-v4-runtime
+          path: runtime_bundle
+          compression-level: 0
+          if-no-files-found: error
