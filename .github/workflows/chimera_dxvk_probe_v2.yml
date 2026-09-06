@@ -1,0 +1,246 @@
+name: Chimera DXVK Renderer Probe v2
+
+on:
+  push:
+    branches:
+      - chimera-amd-nr
+    paths:
+      - '.github/workflows/chimera_dxvk_probe_v2.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-dxvk:
+    name: Build patched DXVK depth probe
+    runs-on: ubuntu-latest
+    container: archlinux/archlinux:base-devel
+    steps:
+      - name: Install build dependencies
+        run: pacman -Syu --needed --noconfirm git meson mingw-w64-gcc glslang python python-yaml
+
+      - name: Clone Chimera source and pinned DXVK
+        run: |
+          git clone --branch chimera-amd-nr --single-branch https://github.com/doubledd1403-hue/OptiScaler_DLSSNR.git chimera-source
+          git clone https://github.com/doitsujin/dxvk.git dxvk
+          cd dxvk
+          git checkout d7ac2580aa274a14a500e74edbe4ec6aae250e4a
+          git submodule update --init --recursive
+
+      - name: Reuse proven Chimera depth patch
+        run: |
+          python3 - <<'PY'
+          import yaml
+          from pathlib import Path
+          wf = yaml.safe_load(Path('chimera-source/.github/workflows/chimera_dxvk_probe_v1.yml').read_text())
+          step = next(s for s in wf['jobs']['build-dxvk']['steps'] if s.get('name') == 'Add Chimera DXVK depth probe')
+          Path('/tmp/chimera_patch.sh').write_text(step['run'])
+          PY
+          cd dxvk
+          bash /tmp/chimera_patch.sh
+
+      - name: Expand probe heartbeat and DSV capture paths
+        working-directory: dxvk
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path('src/d3d11/d3d11_context.cpp')
+          s = p.read_text(encoding='utf-8')
+
+          # V1 only wrote its status file when OMSetRenderTargets carried a depth view.
+          # That made "Waiting for game" ambiguous: DLL not loaded vs. game using a different
+          # render-target path. V2 adds a draw heartbeat and also observes the UAV variant.
+          needle = '            void chimeraProbeDepth(D3D11DepthStencilView* dsv) {\n'
+          insert = '''            void chimeraHeartbeat() {\n              std::lock_guard<std::mutex> lock(g_chimeraProbeMutex);\n              chimeraWriteProbeLocked();\n            }\n\n            void chimeraProbeDepth(D3D11DepthStencilView* dsv) {\n'''
+          if needle not in s:
+              raise SystemExit('Could not locate chimeraProbeDepth helper')
+          s = s.replace(needle, insert, 1)
+
+          old = '''    if (pDepthStencilView)\n      chimeraProbeDepth(static_cast<D3D11DepthStencilView*>(pDepthStencilView));'''
+          new = '''    chimeraHeartbeat();\n    if (pDepthStencilView)\n      chimeraProbeDepth(static_cast<D3D11DepthStencilView*>(pDepthStencilView));'''
+          if old not in s:
+              raise SystemExit('Could not locate V1 OMSetRenderTargets hook')
+          s = s.replace(old, new, 1)
+
+          pattern_uav = re.compile(
+              r'(void STDMETHODCALLTYPE D3D11CommonContext<ContextType>::OMSetRenderTargetsAndUnorderedAccessViews\(\s*'
+              r'UINT\s+NumRTVs,\s*'
+              r'ID3D11RenderTargetView\* const\*\s+ppRenderTargetViews,\s*'
+              r'ID3D11DepthStencilView\*\s+pDepthStencilView,\s*'
+              r'UINT\s+UAVStartSlot,\s*'
+              r'UINT\s+NumUAVs,\s*'
+              r'ID3D11UnorderedAccessView\* const\*\s+ppUnorderedAccessViews,\s*'
+              r'const UINT\*\s+pUAVInitialCounts\) \{)'
+          )
+          m = pattern_uav.search(s)
+          if not m:
+              raise SystemExit('Could not locate OMSetRenderTargetsAndUnorderedAccessViews')
+          replacement = m.group(1) + '''\n    chimeraHeartbeat();\n    if (pDepthStencilView)\n      chimeraProbeDepth(static_cast<D3D11DepthStencilView*>(pDepthStencilView));'''
+          s = s[:m.start()] + replacement + s[m.end():]
+
+          pattern_draw = re.compile(
+              r'(void STDMETHODCALLTYPE D3D11CommonContext<ContextType>::Draw\(\s*'
+              r'UINT\s+VertexCount,\s*'
+              r'UINT\s+StartVertexLocation\) \{)'
+          )
+          m = pattern_draw.search(s)
+          if not m:
+              raise SystemExit('Could not locate Draw implementation')
+          replacement = m.group(1) + '''\n    chimeraHeartbeat();'''
+          s = s[:m.start()] + replacement + s[m.end():]
+
+          p.write_text(s, encoding='utf-8')
+          print('heartbeat calls:', s.count('chimeraHeartbeat();'))
+          print('depth calls:', s.count('chimeraProbeDepth('))
+          PY
+
+          grep -n 'chimeraHeartbeat' src/d3d11/d3d11_context.cpp
+          grep -n 'OMSetRenderTargetsAndUnorderedAccessViews' src/d3d11/d3d11_context.cpp
+
+      - name: Build DXVK x64 and x32
+        working-directory: dxvk
+        run: |
+          export VERSION_NAME="chimera-dxvk-probe-v1"
+          ./package-release.sh "$VERSION_NAME" build --no-package
+
+      - name: Verify and package DXVK outputs
+        working-directory: dxvk
+        run: |
+          set -euxo pipefail
+          root="build/dxvk-chimera-dxvk-probe-v1"
+          test -f "$root/x64/d3d11.dll"
+          test -f "$root/x64/dxgi.dll"
+          test -f "$root/x32/d3d11.dll"
+          test -f "$root/x32/dxgi.dll"
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('build/dxvk-chimera-dxvk-probe-v1/x64/d3d11.dll')
+          if b'CHIMERA_DXVK_PROBE_V1' not in p.read_bytes():
+              raise SystemExit('Chimera marker missing from d3d11.dll')
+          print('Chimera marker verification: PASS')
+          PY
+          mkdir -p ../runtime_bundle
+          cp "$root/x64/d3d11.dll" ../runtime_bundle/d3d11_64.dll
+          cp "$root/x64/dxgi.dll"  ../runtime_bundle/dxgi_64.dll
+          cp "$root/x32/d3d11.dll" ../runtime_bundle/d3d11_32.dll
+          cp "$root/x32/dxgi.dll"  ../runtime_bundle/dxgi_32.dll
+          cp LICENSE ../runtime_bundle/DXVK-LICENSE
+          ls -lh ../runtime_bundle
+
+      - name: Upload DXVK runtime bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: chimera-dxvk-probe-runtime
+          path: runtime_bundle
+          compression-level: 0
+          if-no-files-found: error
+
+  build-decky:
+    name: Build Chimera DXVK Probe Decky plugin
+    needs: build-dxvk
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone Chimera source and proven Decky injector base
+        run: |
+          git clone --branch chimera-amd-nr --single-branch https://github.com/doubledd1403-hue/OptiScaler_DLSSNR.git chimera-source
+          git clone https://github.com/xXJSONDeruloXx/decky-dlss-enabler.git plugin
+          cd plugin
+          git checkout d022d946425e8d2bd98785ed8c87584d0578a0b4
+
+      - name: Download patched DXVK runtime
+        uses: actions/download-artifact@v8
+        with:
+          name: chimera-dxvk-probe-runtime
+          path: plugin/bin
+
+      - name: Reuse proven Chimera Decky conversion
+        run: |
+          python3 -m pip install --quiet pyyaml
+          python3 - <<'PY'
+          import yaml
+          from pathlib import Path
+          wf = yaml.safe_load(Path('chimera-source/.github/workflows/chimera_dxvk_probe_v1.yml').read_text())
+          step = next(s for s in wf['jobs']['build-decky']['steps'] if s.get('name') == 'Convert backend/frontend to Chimera DXVK Probe')
+          Path('/tmp/chimera_convert.sh').write_text(step['run'])
+          PY
+          cd plugin
+          bash /tmp/chimera_convert.sh
+
+      - name: Apply V2 injection and diagnostics fixes
+        working-directory: plugin
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          p = Path('main.py')
+          s = p.read_text(encoding='utf-8')
+          start = s.index('def _chimera_merge_dxvk_override')
+          end = s.index('def _chimera_cleanup_legacy', start)
+          helper = '''def _chimera_merge_dxvk_override(options: str):\n    # Deterministic Proton/Wine native DLL override. Original options are restored on disable.\n    return 'WINEDLLOVERRIDES=\"d3d11=n,b;dxgi=n,b\" SteamDeck=0 %command%'\n\n'''
+          s = s[:start] + helper + s[end:]
+          s = s.replace("'backend':'dxvk-probe-v1'", "'backend':'dxvk-probe-v2'", 1)
+          p.write_text(s, encoding='utf-8')
+          compile(s, 'main.py', 'exec')
+
+          pkg_path = Path('package.json')
+          pkg = json.loads(pkg_path.read_text(encoding='utf-8'))
+          pkg['version'] = '0.4.2'
+          pkg['description'] = 'Chimera DXVK renderer probe v2: independent heartbeat and expanded depth capture'
+          pkg_path.write_text(json.dumps(pkg, indent=2) + '\n', encoding='utf-8')
+          print('V2 backend/package patch: PASS')
+          PY
+
+      - name: Build Decky frontend
+        working-directory: plugin
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.18.1 --activate
+          pnpm install --frozen-lockfile || pnpm install --no-frozen-lockfile
+          pnpm run build
+
+      - name: Assemble validated Decky ZIP
+        working-directory: plugin
+        run: |
+          set -euxo pipefail
+          rm -rf package
+          mkdir -p package/ChimeraLighting/bin package/ChimeraLighting/dist
+          cp plugin.json package.json main.py package/ChimeraLighting/
+          cp dist/index.js package/ChimeraLighting/dist/index.js
+          cp bin/d3d11_64.dll bin/dxgi_64.dll bin/d3d11_32.dll bin/dxgi_32.dll package/ChimeraLighting/bin/
+          cp bin/DXVK-LICENSE package/ChimeraLighting/DXVK-LICENSE
+          cp LICENSE package/ChimeraLighting/DeckyBase-LICENSE.txt
+          (cd package && python3 -m zipfile -c ../Chimera-DXVK-Probe-v2.zip ChimeraLighting)
+
+          python3 - <<'PY'
+          import zipfile, json
+          z=zipfile.ZipFile('Chimera-DXVK-Probe-v2.zip')
+          names=set(z.namelist())
+          required={
+            'ChimeraLighting/plugin.json','ChimeraLighting/package.json','ChimeraLighting/main.py',
+            'ChimeraLighting/dist/index.js','ChimeraLighting/bin/d3d11_64.dll','ChimeraLighting/bin/dxgi_64.dll',
+            'ChimeraLighting/bin/d3d11_32.dll','ChimeraLighting/bin/dxgi_32.dll'
+          }
+          missing=required-names
+          if missing: raise SystemExit(f'Missing package files: {missing}')
+          meta=json.loads(z.read('ChimeraLighting/plugin.json'))
+          if meta.get('api_version') != 1: raise SystemExit('api_version invalid')
+          pkg=json.loads(z.read('ChimeraLighting/package.json'))
+          if pkg.get('version') != '0.4.2': raise SystemExit('version invalid')
+          print('Decky ZIP contract: PASS')
+          PY
+          test $(stat -c%s Chimera-DXVK-Probe-v2.zip) -gt 1000000
+          sha256sum Chimera-DXVK-Probe-v2.zip
+
+      - name: Upload Chimera DXVK Probe plugin
+        uses: actions/upload-artifact@v7
+        with:
+          name: Chimera-DXVK-Probe-v2
+          path: plugin/Chimera-DXVK-Probe-v2.zip
+          compression-level: 0
+          if-no-files-found: error
