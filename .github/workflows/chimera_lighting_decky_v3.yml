@@ -1,0 +1,739 @@
+name: Chimera Lighting Decky v3 - Universal SSRTGI
+
+on:
+  push:
+    branches:
+      - chimera-amd-nr
+    paths:
+      - '.github/workflows/chimera_lighting_decky_v3.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-runtime:
+    name: Build ReShade depth runtime
+    runs-on: windows-latest
+    steps:
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Clone pinned ReShade
+        shell: pwsh
+        run: |
+          git clone https://github.com/crosire/reshade.git reshade
+          Push-Location reshade
+          git checkout 358c345ca2fe64f86e67c694f8379c356627adcb
+          git submodule update --init --recursive
+          Pop-Location
+
+      - name: Add Chimera live-control bridge
+        shell: pwsh
+        run: |
+          $dir = 'reshade\examples\99-chimera_bridge'
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          @'
+          #include <windows.h>
+          #include <reshade.hpp>
+          #include <algorithm>
+          #include <chrono>
+          #include <filesystem>
+          #include <fstream>
+          #include <mutex>
+          #include <string>
+          #include <vector>
+
+          static std::mutex g_mutex;
+          static std::vector<reshade::api::effect_runtime *> g_runtimes;
+          static int g_mode = -1;
+          static auto g_last_poll = std::chrono::steady_clock::now() - std::chrono::seconds(2);
+
+          static std::filesystem::path game_dir()
+          {
+              wchar_t path[MAX_PATH] = {};
+              GetModuleFileNameW(nullptr, path, MAX_PATH);
+              return std::filesystem::path(path).parent_path();
+          }
+
+          static int read_mode()
+          {
+              std::ifstream file(game_dir() / L"chimera_mode.txt");
+              int value = 2;
+              if (file >> value)
+                  return std::clamp(value, 0, 3);
+              return 2;
+          }
+
+          static void write_status(bool depth_ready, int mode)
+          {
+              std::ofstream file(game_dir() / L"chimera_status.txt", std::ios::trunc);
+              if (file)
+                  file << "runtime=1\ndepth=" << (depth_ready ? 1 : 0) << "\nmode=" << mode << "\n";
+          }
+
+          static bool apply_runtime(reshade::api::effect_runtime *runtime, int mode)
+          {
+              if (!runtime)
+                  return false;
+
+              const auto mode_var = runtime->find_uniform_variable("ChimeraLighting.fx", "ChimeraMode");
+              if (mode_var.handle != 0)
+                  runtime->set_uniform_value_int(mode_var, mode);
+
+              bool depth_ready = false;
+              const auto depth_var = runtime->find_uniform_variable("ChimeraLighting.fx", "ChimeraDepthReady");
+              if (depth_var.handle != 0)
+                  runtime->get_uniform_value_bool(depth_var, &depth_ready, 1);
+
+              return depth_ready;
+          }
+
+          static void on_init_runtime(reshade::api::effect_runtime *runtime)
+          {
+              std::scoped_lock lock(g_mutex);
+              g_runtimes.push_back(runtime);
+              const int mode = read_mode();
+              const bool depth_ready = apply_runtime(runtime, mode);
+              g_mode = mode;
+              write_status(depth_ready, mode);
+          }
+
+          static void on_destroy_runtime(reshade::api::effect_runtime *runtime)
+          {
+              std::scoped_lock lock(g_mutex);
+              g_runtimes.erase(std::remove(g_runtimes.begin(), g_runtimes.end(), runtime), g_runtimes.end());
+          }
+
+          static void on_present(reshade::api::command_queue *, reshade::api::swapchain *,
+                                 const reshade::api::rect *, const reshade::api::rect *,
+                                 uint32_t, const reshade::api::rect *)
+          {
+              const auto now = std::chrono::steady_clock::now();
+              if (now - g_last_poll < std::chrono::milliseconds(100))
+                  return;
+              g_last_poll = now;
+
+              const int mode = read_mode();
+              std::scoped_lock lock(g_mutex);
+              bool any_depth = false;
+              for (auto *runtime : g_runtimes)
+                  any_depth = apply_runtime(runtime, mode) || any_depth;
+              g_mode = mode;
+              write_status(any_depth, mode);
+          }
+
+          extern "C" __declspec(dllexport) const char *NAME = "Chimera Lighting Bridge";
+          extern "C" __declspec(dllexport) const char *DESCRIPTION = "Live Decky control bridge for Chimera Lighting.";
+
+          BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)
+          {
+              switch (reason)
+              {
+              case DLL_PROCESS_ATTACH:
+                  if (!reshade::register_addon(hModule))
+                      return FALSE;
+                  reshade::register_event<reshade::addon_event::init_effect_runtime>(on_init_runtime);
+                  reshade::register_event<reshade::addon_event::destroy_effect_runtime>(on_destroy_runtime);
+                  reshade::register_event<reshade::addon_event::present>(on_present);
+                  break;
+              case DLL_PROCESS_DETACH:
+                  reshade::unregister_addon(hModule);
+                  break;
+              }
+              return TRUE;
+          }
+          '@ | Set-Content -Encoding UTF8 "$dir\chimera_bridge_addon.cpp"
+
+          @'
+          cmake_minimum_required(VERSION 3.23)
+          project(ChimeraBridge LANGUAGES CXX)
+          add_library(chimera_bridge SHARED chimera_bridge_addon.cpp)
+          target_include_directories(chimera_bridge PRIVATE ../../include)
+          target_compile_features(chimera_bridge PRIVATE cxx_std_17)
+          target_compile_definitions(chimera_bridge PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+          if(MSVC)
+            target_compile_options(chimera_bridge PRIVATE /EHsc /utf-8)
+          endif()
+          if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+            set(CHIMERA_ADDON_SUFFIX ".addon64")
+          else()
+            set(CHIMERA_ADDON_SUFFIX ".addon32")
+          endif()
+          set_target_properties(chimera_bridge PROPERTIES PREFIX "" SUFFIX "${CHIMERA_ADDON_SUFFIX}")
+          '@ | Set-Content -Encoding UTF8 "$dir\CMakeLists.txt"
+
+      - name: Verify built-in generic depth support
+        shell: pwsh
+        run: |
+          $cmake = Get-Content reshade\CMakeLists.txt -Raw
+          if ($cmake -notmatch 'examples/09-depth/generic_depth_addon.cpp') { throw "Pinned ReShade no longer embeds generic depth support" }
+          if ($cmake -notmatch 'RESHADE_ADDON=2') { throw "Pinned ReShade is not configured for full add-on support" }
+
+      - name: Generate ReShade version header
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          Push-Location reshade
+          & .\tools\update_version.ps1 -path (Join-Path (Get-Location) 'res\version.h')
+          if (!(Test-Path 'res\version.h')) { throw "ReShade version header was not generated" }
+          Get-Content 'res\version.h'
+          Pop-Location
+
+      - name: Build ReShade 32 and 64 bit with CMake
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+
+          cmake -S reshade -B build-reshade-x64 -A x64
+          cmake --build build-reshade-x64 --config Release --target ReShade --parallel 2
+
+          cmake -S reshade -B build-reshade-x86 -A Win32
+          cmake --build build-reshade-x86 --config Release --target ReShade --parallel 2
+
+          $r64 = Get-ChildItem build-reshade-x64 -Recurse -Filter ReShade64.dll | Select-Object -First 1
+          $r32 = Get-ChildItem build-reshade-x86 -Recurse -Filter ReShade32.dll | Select-Object -First 1
+          if (!$r64 -or !$r32) { throw "ReShade runtime DLLs were not produced" }
+          Write-Host "ReShade x64: $($r64.FullName) ($($r64.Length) bytes)"
+          Write-Host "ReShade x86: $($r32.FullName) ($($r32.Length) bytes)"
+
+      - name: Build Chimera bridge 32 and 64 bit
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          cmake -S reshade\examples\99-chimera_bridge -B build-bridge-x64 -A x64
+          cmake --build build-bridge-x64 --config Release --parallel 2
+          cmake -S reshade\examples\99-chimera_bridge -B build-bridge-x86 -A Win32
+          cmake --build build-bridge-x86 --config Release --parallel 2
+
+      - name: Collect runtime bundle
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force runtime_bundle | Out-Null
+          $r64 = Get-ChildItem build-reshade-x64 -Recurse -Filter ReShade64.dll | Select-Object -First 1
+          $r32 = Get-ChildItem build-reshade-x86 -Recurse -Filter ReShade32.dll | Select-Object -First 1
+          $b64 = Get-ChildItem build-bridge-x64 -Recurse -Filter chimera_bridge.addon64 | Select-Object -First 1
+          $b32 = Get-ChildItem build-bridge-x86 -Recurse -Filter chimera_bridge.addon32 | Select-Object -First 1
+          if (!$r64 -or !$r32 -or !$b64 -or !$b32) {
+            Write-Host "=== ReShade x64 outputs ==="
+            Get-ChildItem build-reshade-x64 -Recurse -File | Where-Object { $_.Name -match 'ReShade.*\.dll$' } | Select-Object FullName,Length
+            Write-Host "=== ReShade x86 outputs ==="
+            Get-ChildItem build-reshade-x86 -Recurse -File | Where-Object { $_.Name -match 'ReShade.*\.dll$' } | Select-Object FullName,Length
+            Write-Host "=== Bridge outputs ==="
+            Get-ChildItem build-bridge-x64,build-bridge-x86 -Recurse -File | Where-Object { $_.Name -like '*.addon*' } | Select-Object FullName,Length
+            throw "Expected ReShade/Chimera runtime outputs were not found"
+          }
+          Copy-Item $r64.FullName runtime_bundle\ReShade64.dll
+          Copy-Item $r32.FullName runtime_bundle\ReShade32.dll
+          Copy-Item $b64.FullName runtime_bundle\chimera_bridge.addon64
+          Copy-Item $b32.FullName runtime_bundle\chimera_bridge.addon32
+          Copy-Item reshade\LICENSE.md runtime_bundle\ReShade-LICENSE.md
+          Get-ChildItem runtime_bundle
+          foreach ($f in Get-ChildItem runtime_bundle -File) {
+            if ($f.Name -like 'ReShade*.dll' -and $f.Length -lt 1000000) { throw "ReShade runtime suspiciously small: $($f.Name)" }
+            if ($f.Name -like '*.addon*' -and $f.Length -lt 4096) { throw "Chimera add-on suspiciously small: $($f.Name)" }
+          }
+
+      - name: Upload runtime bundle
+        uses: actions/upload-artifact@v7.0.0
+        with:
+          name: chimera-lighting-runtime
+          path: runtime_bundle
+          compression-level: 0
+          if-no-files-found: error
+
+  build-decky:
+    name: Build one-click Decky plugin
+    needs: build-runtime
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone proven Decky injector base
+        run: |
+          git clone https://github.com/xXJSONDeruloXx/decky-dlss-enabler.git plugin
+          cd plugin
+          git checkout d022d946425e8d2bd98785ed8c87584d0578a0b4
+
+      - name: Download Chimera runtime
+        uses: actions/download-artifact@v8.0.0
+        with:
+          name: chimera-lighting-runtime
+          path: plugin/bin
+
+      - name: Convert plugin to Chimera Lighting
+        working-directory: plugin
+        shell: bash
+        run: |
+          cat > plugin.json <<'EOF'
+          {
+            "name": "Chimera Lighting",
+            "author": "Chimera project",
+            "flags": [],
+            "api_version": 1,
+            "publish": {
+              "tags": ["graphics", "proton", "games"],
+              "description": "Universal depth-aware GI and contact shadows with live Decky controls."
+            }
+          }
+          EOF
+
+          python3 - <<'PY'
+          import json
+          p='package.json'
+          data=json.load(open(p))
+          data['name']='chimera-lighting-decky'
+          data['version']='0.1.0'
+          data['description']='Universal depth-aware Chimera Lighting for Proton games'
+          data.pop('remote_binary_bundling',None)
+          data.pop('remote_binary',None)
+          with open(p,'w') as f: json.dump(data,f,indent=2); f.write('\n')
+          PY
+
+          cat > bin/ChimeraLighting.fx <<'EOF'
+          #include "ReShade.fxh"
+
+          uniform int ChimeraMode < hidden = true; > = 2;
+          uniform bool ChimeraDepthReady < source = "bufready_depth"; >;
+          uniform float ChimeraGIStrength < hidden = true; > = 0.72;
+          uniform float ChimeraAOLevel < hidden = true; > = 0.58;
+
+          float2 ChimeraDir(int i)
+          {
+              static const float2 dirs[16] = {
+                  float2(1.000,0.000), float2(0.924,0.383), float2(0.707,0.707), float2(0.383,0.924),
+                  float2(0.000,1.000), float2(-0.383,0.924), float2(-0.707,0.707), float2(-0.924,0.383),
+                  float2(-1.000,0.000), float2(-0.924,-0.383), float2(-0.707,-0.707), float2(-0.383,-0.924),
+                  float2(0.000,-1.000), float2(0.383,-0.924), float2(0.707,-0.707), float2(0.924,-0.383)
+              };
+              return dirs[i & 15];
+          }
+
+          float3 ChimeraNormal(float2 uv)
+          {
+              const float2 px = BUFFER_PIXEL_SIZE;
+              float c = ReShade::GetLinearizedDepth(uv);
+              float l = ReShade::GetLinearizedDepth(uv - float2(px.x, 0));
+              float r = ReShade::GetLinearizedDepth(uv + float2(px.x, 0));
+              float u = ReShade::GetLinearizedDepth(uv - float2(0, px.y));
+              float d = ReShade::GetLinearizedDepth(uv + float2(0, px.y));
+              float2 g = float2(r - l, d - u);
+              return normalize(float3(-g * 220.0, 1.0));
+          }
+
+          float4 PS_ChimeraLighting(float4 pos : SV_Position, float2 uv : TexCoord) : SV_Target
+          {
+              float3 base = tex2D(ReShade::BackBuffer, uv).rgb;
+              if (ChimeraMode <= 0)
+                  return float4(base, 1.0);
+
+              float depth = ReShade::GetLinearizedDepth(uv);
+              if (depth >= 0.99999)
+                  return float4(base, 1.0);
+
+              int rays = ChimeraMode == 1 ? 4 : (ChimeraMode == 2 ? 8 : 16);
+              float radius = ChimeraMode == 1 ? 14.0 : (ChimeraMode == 2 ? 22.0 : 30.0);
+              float3 normal = ChimeraNormal(uv);
+              float3 gi = 0.0;
+              float occ = 0.0;
+              float weight = 0.0;
+              float seed = frac(sin(dot(uv * BUFFER_SCREEN_SIZE, float2(12.9898,78.233))) * 43758.5453);
+
+              [loop]
+              for (int i = 0; i < 16; ++i)
+              {
+                  if (i >= rays) break;
+                  float a = 6.2831853 * seed + (6.2831853 * (float)i / (float)rays);
+                  float2 dir = float2(cos(a), sin(a));
+
+                  [unroll]
+                  for (int s = 1; s <= 4; ++s)
+                  {
+                      float stepf = (float)s / 4.0;
+                      float2 suv = saturate(uv + dir * BUFFER_PIXEL_SIZE * radius * stepf * stepf);
+                      float sd = ReShade::GetLinearizedDepth(suv);
+                      float delta = sd - depth;
+                      float proximity = saturate(1.0 - abs(delta) * 120.0);
+                      float front = saturate((-delta) * 180.0);
+                      float horizon = saturate(dot(normal.xy, dir) * 0.5 + 0.5);
+                      float w = proximity * (0.35 + 0.65 * horizon) / (1.0 + (float)s);
+                      gi += tex2D(ReShade::BackBuffer, suv).rgb * w * (1.0 - front * 0.55);
+                      occ += front * proximity / (float)s;
+                      weight += w;
+                  }
+              }
+
+              gi /= max(weight, 0.0001);
+              occ = saturate(occ / max((float)rays * 0.72, 1.0));
+
+              float lumaBase = dot(base, float3(0.2126,0.7152,0.0722));
+              float lumaGI = dot(gi, float3(0.2126,0.7152,0.0722));
+              float bounceGate = saturate((lumaGI - lumaBase * 0.15) * 1.6 + 0.18);
+              float giStrength = ChimeraGIStrength * (ChimeraMode == 1 ? 0.58 : (ChimeraMode == 2 ? 0.78 : 0.95));
+              float aoStrength = ChimeraAOLevel * (ChimeraMode == 1 ? 0.62 : (ChimeraMode == 2 ? 0.82 : 1.0));
+
+              float3 lit = base + gi * giStrength * bounceGate * 0.22;
+              lit *= 1.0 - occ * aoStrength * 0.34;
+              lit = clamp(lit, 0.0, 1.0);
+              return float4(lit, 1.0);
+          }
+
+          technique ChimeraLighting
+          {
+              pass
+              {
+                  VertexShader = PostProcessVS;
+                  PixelShader = PS_ChimeraLighting;
+              }
+          }
+          EOF
+
+          cat > bin/ReShade.ini <<'EOF'
+          [GENERAL]
+          EffectSearchPaths=.\\reshade-shaders\\Shaders
+          TextureSearchPaths=.\\reshade-shaders\\Textures
+          PresetPath=.\\ChimeraPreset.ini
+          AddonPath=.\\
+          PerformanceMode=1
+          ShowForceLoadButton=0
+          NoDebugInfo=1
+          SkipLoadingDisabledEffects=0
+          
+          [INPUT]
+          KeyOverlay=0,0,0,0
+          EOF
+
+          cat > bin/ChimeraPreset.ini <<'EOF'
+          Techniques=ChimeraLighting@ChimeraLighting.fx
+          TechniqueSorting=ChimeraLighting@ChimeraLighting.fx
+          [ChimeraLighting.fx]
+          ChimeraMode=2
+          ChimeraGIStrength=0.720000
+          ChimeraAOLevel=0.580000
+          EOF
+
+          cat >> main.py <<'PY'
+
+          # ================= CHIMERA LIGHTING OVERRIDES =================
+          CHIMERA_MARKER = ".chimera_lighting.json"
+          CHIMERA_FILES = [
+              "ReShade.ini", "ChimeraPreset.ini", "chimera_mode.txt", "chimera_status.txt",
+              "chimera_bridge.addon32", "chimera_bridge.addon64",
+          ]
+
+          def _chimera_pe_info(path: Path):
+              data = path.read_bytes()
+              if len(data) < 0x100 or data[:2] != b"MZ":
+                  return {"bits": 64, "imports": set()}
+              pe = struct.unpack_from("<I", data, 0x3C)[0]
+              if pe + 24 >= len(data) or data[pe:pe+4] != b"PE\\0\\0":
+                  return {"bits": 64, "imports": set()}
+              machine = struct.unpack_from("<H", data, pe + 4)[0]
+              bits = 64 if machine in (0x8664, 0xAA64) else 32
+              # Import detection by string scan is intentionally tolerant of packed launchers.
+              low = data.lower()
+              names = {n for n in (b"d3d9.dll", b"d3d10.dll", b"d3d11.dll", b"d3d12.dll", b"dxgi.dll") if n in low}
+              return {"bits": bits, "imports": {n.decode() for n in names}}
+
+          def _chimera_choose_proxy(exe: Path | None, override: str = "auto"):
+              override = str(override or "auto").lower()
+              info = _chimera_pe_info(exe) if exe and exe.exists() else {"bits": 64, "imports": set()}
+              if override == "dx9":
+                  return "d3d9", info["bits"]
+              if override in ("dxgi", "dx10-12"):
+                  return "dxgi", info["bits"]
+              imports = info["imports"]
+              proxy = "d3d9" if "d3d9.dll" in imports and not ({"d3d11.dll", "d3d12.dll", "dxgi.dll"} & imports) else "dxgi"
+              return proxy, info["bits"]
+
+          def _chimera_marker_path(target_dir: Path):
+              return target_dir / CHIMERA_MARKER
+
+          def _chimera_merge_override(options: str, proxy: str):
+              options = str(options or "").strip()
+              token = f"{proxy}=n,b"
+              m = re.search(r'WINEDLLOVERRIDES=([^\\s]+)', options)
+              if m:
+                  current = m.group(1)
+                  if proxy + "=" not in current:
+                      merged = token + ";" + current
+                      options = options[:m.start(1)] + merged + options[m.end(1):]
+                  return options
+              return (f"WINEDLLOVERRIDES={token} " + options).strip()
+
+          async def _chimera_enable_game(self, appid: str, current_launch_options: str = "", api_override: str = "auto") -> dict:
+              try:
+                  game_info = self._game_record(str(appid))
+                  if not game_info:
+                      return {"status":"error", "message":"Game installation was not found."}
+                  target_dir, target_exe = self._guess_patch_target(game_info)
+                  target_dir.mkdir(parents=True, exist_ok=True)
+                  proxy, bits = _chimera_choose_proxy(target_exe, api_override)
+                  proxy_path = target_dir / f"{proxy}.dll"
+                  backup_path = target_dir / f"{proxy}.dll.chimera_backup"
+                  runtime = self._plugin_bin_dir() / ("ReShade64.dll" if bits == 64 else "ReShade32.dll")
+                  if not runtime.exists():
+                      raise FileNotFoundError(f"Missing bundled {bits}-bit runtime")
+
+                  if proxy_path.exists() and not backup_path.exists():
+                      shutil.copy2(proxy_path, backup_path)
+                  shutil.copy2(runtime, proxy_path)
+
+                  for name in [f"chimera_bridge.addon{bits}", "ReShade.ini", "ChimeraPreset.ini"]:
+                      src = self._plugin_bin_dir() / name
+                      if src.exists(): shutil.copy2(src, target_dir / name)
+
+                  shader_dir = target_dir / "reshade-shaders" / "Shaders"
+                  shader_dir.mkdir(parents=True, exist_ok=True)
+                  shutil.copy2(self._plugin_bin_dir() / "ChimeraLighting.fx", shader_dir / "ChimeraLighting.fx")
+                  (target_dir / "chimera_mode.txt").write_text("2\n", encoding="utf-8")
+
+                  launch = _chimera_merge_override(current_launch_options, proxy)
+                  marker = {
+                      "appid": str(appid), "name": game_info.get("name", ""), "proxy": proxy,
+                      "bits": bits, "target_dir": str(target_dir), "target_exe": str(target_exe or ""),
+                      "backup": str(backup_path) if backup_path.exists() else "",
+                      "original_launch_options": current_launch_options, "managed_launch_options": launch,
+                  }
+                  _chimera_marker_path(target_dir).write_text(json.dumps(marker, indent=2), encoding="utf-8")
+                  return {"status":"success", "enabled":True, "mode":2, "proxy":proxy, "bits":bits,
+                          "launch_options":launch, "restart_required":True,
+                          "target_dir":str(target_dir), "name":game_info.get("name", "")}
+              except Exception as exc:
+                  decky.logger.error(f"[Chimera Lighting] enable failed: {exc}")
+                  return {"status":"error", "message":str(exc)}
+
+          async def _chimera_disable_game(self, appid: str) -> dict:
+              try:
+                  game_info = self._game_record(str(appid))
+                  if not game_info:
+                      return {"status":"error", "message":"Game installation was not found."}
+                  target_dir, _ = self._guess_patch_target(game_info)
+                  marker_path = _chimera_marker_path(target_dir)
+                  marker = json.loads(marker_path.read_text(encoding="utf-8")) if marker_path.exists() else {}
+                  proxy = marker.get("proxy", "dxgi")
+                  proxy_path = target_dir / f"{proxy}.dll"
+                  backup_path = target_dir / f"{proxy}.dll.chimera_backup"
+                  if proxy_path.exists(): proxy_path.unlink()
+                  if backup_path.exists(): shutil.move(str(backup_path), str(proxy_path))
+                  for name in CHIMERA_FILES:
+                      p = target_dir / name
+                      if p.exists(): p.unlink()
+                  shader = target_dir / "reshade-shaders" / "Shaders" / "ChimeraLighting.fx"
+                  if shader.exists(): shader.unlink()
+                  if marker_path.exists(): marker_path.unlink()
+                  return {"status":"success", "enabled":False,
+                          "launch_options":marker.get("original_launch_options", "")}
+              except Exception as exc:
+                  return {"status":"error", "message":str(exc)}
+
+          async def _chimera_set_mode(self, appid: str, mode: int) -> dict:
+              try:
+                  mode = max(0, min(3, int(mode)))
+                  game_info = self._game_record(str(appid))
+                  if not game_info: return {"status":"error", "message":"Game not found."}
+                  target_dir, _ = self._guess_patch_target(game_info)
+                  marker = _chimera_marker_path(target_dir)
+                  if not marker.exists(): return {"status":"error", "message":"Enable Chimera for this game first."}
+                  (target_dir / "chimera_mode.txt").write_text(f"{mode}\n", encoding="utf-8")
+                  return {"status":"success", "mode":mode}
+              except Exception as exc:
+                  return {"status":"error", "message":str(exc)}
+
+          async def _chimera_status(self, appid: str) -> dict:
+              try:
+                  game_info = self._game_record(str(appid))
+                  if not game_info: return {"status":"error", "message":"Game not found."}
+                  target_dir, target_exe = self._guess_patch_target(game_info)
+                  marker_path = _chimera_marker_path(target_dir)
+                  enabled = marker_path.exists()
+                  marker = json.loads(marker_path.read_text(encoding="utf-8")) if enabled else {}
+                  mode = 0
+                  mode_file = target_dir / "chimera_mode.txt"
+                  if mode_file.exists():
+                      try: mode = max(0,min(3,int(mode_file.read_text().strip())))
+                      except Exception: pass
+                  runtime_active = False
+                  depth_ready = False
+                  status_file = target_dir / "chimera_status.txt"
+                  if status_file.exists():
+                      try:
+                          age = __import__('time').time() - status_file.stat().st_mtime
+                          vals = dict(line.split('=',1) for line in status_file.read_text().splitlines() if '=' in line)
+                          runtime_active = age < 5 and vals.get('runtime') == '1'
+                          depth_ready = age < 5 and vals.get('depth') == '1'
+                      except Exception: pass
+                  return {"status":"success", "enabled":enabled, "mode":mode, "runtime_active":runtime_active,
+                          "depth_ready":depth_ready, "name":game_info.get("name",""),
+                          "target_exe":str(target_exe or ""), "proxy":marker.get("proxy"), "bits":marker.get("bits")}
+              except Exception as exc:
+                  return {"status":"error", "message":str(exc)}
+
+          Plugin.enable_game = _chimera_enable_game
+          Plugin.disable_game = _chimera_disable_game
+          Plugin.set_mode = _chimera_set_mode
+          Plugin.chimera_status = _chimera_status
+          PY
+
+          cat > src/index.tsx <<'EOF'
+          import { ButtonItem, DropdownItem, Field, PanelSection, PanelSectionRow, Router, ToggleField } from "@decky/ui";
+          import { callable, definePlugin, toaster } from "@decky/api";
+          import { useCallback, useEffect, useMemo, useState } from "react";
+          import { FaLightbulb } from "react-icons/fa";
+
+          type Game = { appid: string; name: string };
+          type ListResponse = { status: string; games: Game[]; message?: string };
+          type Status = { status: string; enabled?: boolean; mode?: number; runtime_active?: boolean; depth_ready?: boolean; name?: string; proxy?: string; bits?: number; message?: string };
+          type EnableResult = { status: string; launch_options?: string; restart_required?: boolean; message?: string };
+
+          const listGames = callable<[], ListResponse>("list_installed_games");
+          const getStatus = callable<[appid: string], Status>("chimera_status");
+          const enableGame = callable<[appid: string, launch: string, api: string], EnableResult>("enable_game");
+          const disableGame = callable<[appid: string], EnableResult>("disable_game");
+          const setMode = callable<[appid: string, mode: number], Status>("set_mode");
+
+          const getLaunchOptions = (appid: number): Promise<string> => new Promise((resolve) => {
+            let unregister = () => undefined;
+            const reg = SteamClient.Apps.RegisterForAppDetails(appid, (details: { strLaunchOptions?: string }) => {
+              unregister(); resolve(details?.strLaunchOptions ?? "");
+            });
+            unregister = reg.unregister;
+            window.setTimeout(() => { unregister(); resolve(""); }, 4000);
+          });
+
+          function Content() {
+            const [games, setGames] = useState<Game[]>([]);
+            const [selected, setSelected] = useState<string>("");
+            const [status, setStatus] = useState<Status | null>(null);
+            const [busy, setBusy] = useState(false);
+            const [api, setApi] = useState("auto");
+
+            const runningId = String(Router.MainRunningApp?.appid ?? "");
+            const runningName = Router.MainRunningApp?.display_name ?? "";
+
+            const refresh = useCallback(async (id?: string) => {
+              const target = id ?? selected;
+              if (!target) return;
+              const s = await getStatus(target);
+              setStatus(s);
+            }, [selected]);
+
+            useEffect(() => {
+              (async () => {
+                const r = await listGames();
+                if (r.status === "success") {
+                  setGames(r.games);
+                  const preferred = runningId && r.games.some(g => g.appid === runningId) ? runningId : (r.games[0]?.appid ?? "");
+                  setSelected(preferred);
+                }
+              })();
+            }, []);
+
+            useEffect(() => {
+              if (runningId && games.some(g => g.appid === runningId) && runningId !== selected) setSelected(runningId);
+            }, [runningId, games]);
+
+            useEffect(() => {
+              if (!selected) return;
+              void refresh(selected);
+              const timer = window.setInterval(() => void refresh(selected), 1500);
+              return () => window.clearInterval(timer);
+            }, [selected, refresh]);
+
+            const selectedGame = useMemo(() => games.find(g => g.appid === selected), [games, selected]);
+            const live = !!status?.runtime_active;
+            const depth = !!status?.depth_ready;
+            const mode = status?.mode ?? 0;
+
+            const toggleEnabled = async (enabled: boolean) => {
+              if (!selected || busy) return;
+              setBusy(true);
+              try {
+                if (enabled) {
+                  const old = await getLaunchOptions(Number(selected));
+                  const r = await enableGame(selected, old, api);
+                  if (r.status !== "success") throw new Error(r.message || "Enable failed");
+                  if (r.launch_options !== undefined) SteamClient.Apps.SetAppLaunchOptions(Number(selected), r.launch_options);
+                  toaster.toast({ title: "Chimera Lighting", body: "Enabled. Restart the game once; after that the lighting modes switch live." });
+                } else {
+                  const r = await disableGame(selected);
+                  if (r.status !== "success") throw new Error(r.message || "Disable failed");
+                  if (r.launch_options !== undefined) SteamClient.Apps.SetAppLaunchOptions(Number(selected), r.launch_options);
+                  toaster.toast({ title: "Chimera Lighting", body: "Disabled and original game files restored." });
+                }
+                await refresh(selected);
+              } catch (e) {
+                toaster.toast({ title: "Chimera Lighting", body: e instanceof Error ? e.message : String(e) });
+              } finally { setBusy(false); }
+            };
+
+            const changeMode = async (value: number) => {
+              if (!selected || !status?.enabled) return;
+              setStatus({ ...status, mode: value });
+              const r = await setMode(selected, value);
+              if (r.status !== "success") toaster.toast({ title: "Chimera Lighting", body: r.message || "Mode change failed" });
+            };
+
+            return <>
+              <PanelSection title="Current game">
+                <PanelSectionRow><Field label={runningId === selected && runningName ? runningName : (selectedGame?.name || "No game selected")} description={runningId === selected ? "Running now" : "Fallback selection"} /></PanelSectionRow>
+                {runningId !== selected && <PanelSectionRow><DropdownItem label="Game" rgOptions={games.map(g => ({ data: g.appid, label: g.name }))} selectedOption={selected} onChange={(o:any) => setSelected(String(o.data))} /></PanelSectionRow>}
+                <PanelSectionRow><ToggleField label="Enable for this game" checked={!!status?.enabled} disabled={busy || !selected} onChange={toggleEnabled} /></PanelSectionRow>
+              </PanelSection>
+
+              <PanelSection title="Lighting">
+                <PanelSectionRow><DropdownItem label="Mode" description="Switches live while the game is running" rgOptions={[
+                  {data:0,label:"Off (A/B baseline)"},{data:1,label:"Low · 4 rays"},{data:2,label:"Medium · 8 rays"},{data:3,label:"High · 16 rays"}
+                ]} selectedOption={mode} disabled={!status?.enabled} onChange={(o:any) => void changeMode(Number(o.data))} /></PanelSectionRow>
+                <PanelSectionRow><Field label="Runtime" description={live ? "✓ Active in game" : (status?.enabled ? "Not active · restart/start game" : "Not installed")} /></PanelSectionRow>
+                <PanelSectionRow><Field label="Depth" description={live ? (depth ? "✓ Working" : "⚠ No usable depth yet") : "Waiting for game"} /></PanelSectionRow>
+              </PanelSection>
+
+              <PanelSection title="Compatibility">
+                <PanelSectionRow><DropdownItem label="Graphics API" description="Auto is recommended. Change only if injection fails." rgOptions={[
+                  {data:"auto",label:"Auto"},{data:"dx9",label:"DX9"},{data:"dxgi",label:"DX10 / DX11 / DX12"}
+                ]} selectedOption={api} disabled={!!status?.enabled} onChange={(o:any) => setApi(String(o.data))} /></PanelSectionRow>
+              </PanelSection>
+            </>;
+          }
+
+          export default definePlugin(() => ({ name: "Chimera Lighting", titleView: <div className="Title">Chimera Lighting</div>, content: <Content />, icon: <FaLightbulb /> }));
+          EOF
+
+      - name: Build Decky frontend
+        working-directory: plugin
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.18.1 --activate
+          pnpm install --frozen-lockfile || pnpm install --no-frozen-lockfile
+          pnpm run build
+
+      - name: Assemble one-file Decky ZIP
+        working-directory: plugin
+        run: |
+          set -euxo pipefail
+          rm -rf package
+          mkdir -p package/ChimeraLighting/bin package/ChimeraLighting/dist
+          cp plugin.json main.py package/ChimeraLighting/
+          cp dist/index.js package/ChimeraLighting/dist/index.js
+          cp bin/ReShade32.dll bin/ReShade64.dll package/ChimeraLighting/bin/
+          cp bin/chimera_bridge.addon32 bin/chimera_bridge.addon64 package/ChimeraLighting/bin/
+          cp bin/ChimeraLighting.fx bin/ReShade.ini bin/ChimeraPreset.ini package/ChimeraLighting/bin/
+          cp LICENSE package/ChimeraLighting/DeckyBase-LICENSE.txt
+          cp bin/ReShade-LICENSE.md package/ChimeraLighting/ReShade-LICENSE.md
+          (cd package && python3 -m zipfile -c ../Chimera-Lighting-Decky-v3.zip ChimeraLighting)
+          unzip -l Chimera-Lighting-Decky-v3.zip
+          test $(stat -c%s Chimera-Lighting-Decky-v3.zip) -gt 1000000
+          grep -q '"api_version": 1' package/ChimeraLighting/plugin.json
+          grep -q 'Chimera Lighting' package/ChimeraLighting/dist/index.js
+          grep -q 'ChimeraMode' package/ChimeraLighting/bin/ChimeraLighting.fx
+          sha256sum Chimera-Lighting-Decky-v3.zip
+
+      - name: Upload Chimera Lighting Decky plugin
+        uses: actions/upload-artifact@v7.0.0
+        with:
+          name: Chimera-Lighting-Decky-v3
+          path: plugin/Chimera-Lighting-Decky-v3.zip
+          compression-level: 0
+          if-no-files-found: error
