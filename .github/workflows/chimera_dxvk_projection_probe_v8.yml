@@ -1,0 +1,405 @@
+name: Chimera DXVK Projection Probe v8
+
+on:
+  push:
+    branches:
+      - chimera-amd-nr
+    paths:
+      - '.github/workflows/chimera_dxvk_projection_probe_v8.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-dxvk:
+    name: Build DXVK projection-matrix probe
+    runs-on: ubuntu-latest
+    container: archlinux/archlinux:base-devel
+
+    steps:
+      - name: Install build dependencies
+        run: pacman -Syu --needed --noconfirm git meson mingw-w64-gcc glslang python python-yaml
+
+      - name: Clone Chimera source and pinned DXVK
+        run: |
+          git clone --branch chimera-amd-nr --single-branch https://github.com/doubledd1403-hue/OptiScaler_DLSSNR.git chimera-source
+          git clone https://github.com/doitsujin/dxvk.git dxvk
+          cd dxvk
+          git checkout d7ac2580aa274a14a500e74edbe4ec6aae250e4a
+          git submodule update --init --recursive
+
+      - name: Reuse V1 renderer heartbeat probe
+        run: |
+          python3 - <<'PYIN'
+          import yaml
+          from pathlib import Path
+          wf = yaml.safe_load(Path('chimera-source/.github/workflows/chimera_dxvk_probe_v1.yml').read_text())
+          step = next(s for s in wf['jobs']['build-dxvk']['steps'] if s.get('name') == 'Add Chimera DXVK depth probe')
+          Path('/tmp/chimera_v1.sh').write_text(step['run'])
+          PYIN
+          cd dxvk
+          bash /tmp/chimera_v1.sh
+
+      - name: Reuse V2 heartbeat expansion
+        run: |
+          python3 - <<'PYIN'
+          import yaml
+          from pathlib import Path
+          wf = yaml.safe_load(Path('chimera-source/.github/workflows/chimera_dxvk_probe_v2_fix.yml').read_text())
+          step = next(s for s in wf['jobs']['build-dxvk']['steps'] if s.get('name') == 'Expand probe heartbeat and DSV capture paths')
+          Path('/tmp/chimera_v2.sh').write_text(step['run'])
+          PYIN
+          cd dxvk
+          bash /tmp/chimera_v2.sh
+
+      - name: Reuse V4 CreateDepthStencilView enumeration
+        run: |
+          python3 - <<'PYIN'
+          import yaml
+          from pathlib import Path
+          wf = yaml.safe_load(Path('chimera-source/.github/workflows/chimera_dxvk_depth_create_v4.yml').read_text())
+          step = next(s for s in wf['jobs']['build-dxvk']['steps'] if s.get('name') == 'Add CreateDepthStencilView enumeration')
+          Path('/tmp/chimera_v4.sh').write_text(step['run'])
+          PYIN
+          cd dxvk
+          bash /tmp/chimera_v4.sh
+
+      - name: Add V8 vertex constant-buffer projection probe
+        working-directory: dxvk
+        run: |
+          python3 - <<'PYIN'
+          from pathlib import Path
+          import re
+
+          p = Path('src/d3d11/d3d11_context.cpp')
+          s = p.read_text(encoding='utf-8')
+
+          marker = 'CHIMERA_PROJECTION_V8'
+          if marker in s:
+              raise SystemExit('V8 projection probe already present unexpectedly')
+
+          # V1 already added the Windows/filesystem/chrono infrastructure. Add only
+          # the math/formatting headers needed by the matrix scanner.
+          include_anchor = '#include <algorithm>\n'
+          include_block = '#include <algorithm>\n#include <cmath>\n#include <cstring>\n#include <iomanip>\n#include <sstream>\n'
+          if include_anchor not in s:
+              raise SystemExit('include anchor missing')
+          s = s.replace(include_anchor, include_block, 1)
+
+          ns_anchor = 'namespace dxvk {\n'
+          helper = r'''
+
+          namespace {
+
+            static const char* g_chimeraProjectionMarker = "CHIMERA_PROJECTION_V8";
+
+            struct ChimeraProjectionCandidate {
+              float score = 0.0f;
+              float fovY = 0.0f;
+              float aspect = 0.0f;
+              float m00 = 0.0f;
+              float m11 = 0.0f;
+              float m22 = 0.0f;
+              float p23 = 0.0f;
+              float p32 = 0.0f;
+              float m33 = 0.0f;
+              uint32_t slot = 0;
+              uint32_t bytes = 0;
+              uint32_t floatOffset = 0;
+              uint32_t layout = 0;
+              uint64_t hits = 0;
+            };
+
+            std::mutex g_chimeraProjectionMutex;
+            std::vector<ChimeraProjectionCandidate> g_chimeraProjectionCandidates;
+            auto g_chimeraProjectionLastScan = std::chrono::steady_clock::now() - std::chrono::seconds(2);
+            auto g_chimeraProjectionLastWrite = std::chrono::steady_clock::now() - std::chrono::seconds(2);
+
+            std::filesystem::path chimeraProjectionPath() {
+              wchar_t path[MAX_PATH] = { };
+              DWORD len = GetModuleFileNameW(nullptr, path, MAX_PATH);
+              if (!len || len >= MAX_PATH)
+                return std::filesystem::path(L"chimera_projection_probe.txt");
+              return std::filesystem::path(path).parent_path() / L"chimera_projection_probe.txt";
+            }
+
+            float chimeraProjectionElement(const float* m, uint32_t r, uint32_t c, bool transpose) {
+              return transpose ? m[c * 4u + r] : m[r * 4u + c];
+            }
+
+            bool chimeraScoreProjection(
+                    const float* m,
+                    bool transpose,
+                    uint32_t slot,
+                    uint32_t bytes,
+                    uint32_t floatOffset,
+                    ChimeraProjectionCandidate& out) {
+              for (uint32_t i = 0; i < 16; i++) {
+                if (!std::isfinite(m[i]))
+                  return false;
+              }
+
+              auto a = [&] (uint32_t r, uint32_t c) {
+                return chimeraProjectionElement(m, r, c, transpose);
+              };
+
+              float m00 = a(0,0);
+              float m11 = a(1,1);
+              float m22 = a(2,2);
+              float m23 = a(2,3);
+              float m32 = a(3,2);
+              float m33 = a(3,3);
+
+              float ax = std::abs(m00);
+              float ay = std::abs(m11);
+              if (ax < 0.15f || ax > 8.0f || ay < 0.15f || ay > 8.0f)
+                return false;
+
+              // Perspective matrices have one homogeneous divide term near +/-1
+              // and m33 near zero. Test both row-vector and column-vector forms.
+              float perspectiveError = std::min(std::abs(std::abs(m23) - 1.0f), std::abs(std::abs(m32) - 1.0f));
+              if (perspectiveError > 0.20f || std::abs(m33) > 0.10f)
+                return false;
+
+              float aspect = ay / ax;
+              float fovY = 2.0f * std::atan(1.0f / ay) * 57.29577951308232f;
+              if (!(aspect > 0.7f && aspect < 3.0f && fovY > 15.0f && fovY < 150.0f))
+                return false;
+
+              // Most entries outside the projection axes should be near zero.
+              float zeroPenalty = 0.0f;
+              const uint32_t zeroCoords[][2] = {
+                {0,1},{0,2},{0,3},{1,0},{1,2},{1,3},{2,0},{2,1},{3,0},{3,1}
+              };
+              for (const auto& rc : zeroCoords)
+                zeroPenalty += std::min(std::abs(a(rc[0], rc[1])), 1.0f);
+
+              // Yooka is currently 1280x720. Favor its expected aspect strongly,
+              // but do not hard-reject other aspects so this probe remains useful.
+              float aspectError = std::abs(aspect - (16.0f / 9.0f));
+
+              float score = 20.0f;
+              score -= perspectiveError * 20.0f;
+              score -= std::abs(m33) * 20.0f;
+              score -= zeroPenalty * 1.5f;
+              score -= aspectError * 6.0f;
+              if (fovY >= 35.0f && fovY <= 110.0f)
+                score += 4.0f;
+              if (aspectError < 0.08f)
+                score += 5.0f;
+              if (std::abs(m22) < 0.08f)
+                score += 2.0f; // consistent with the reversed-Z result already seen in V6
+
+              if (score < 8.0f)
+                return false;
+
+              out.score = score;
+              out.fovY = fovY;
+              out.aspect = aspect;
+              out.m00 = m00;
+              out.m11 = m11;
+              out.m22 = m22;
+              out.p23 = m23;
+              out.p32 = m32;
+              out.m33 = m33;
+              out.slot = slot;
+              out.bytes = bytes;
+              out.floatOffset = floatOffset;
+              out.layout = transpose ? 1u : 0u;
+              out.hits = 1;
+              return true;
+            }
+
+            void chimeraStoreProjectionLocked(const ChimeraProjectionCandidate& candidate) {
+              for (auto& existing : g_chimeraProjectionCandidates) {
+                if (existing.slot == candidate.slot
+                 && existing.floatOffset == candidate.floatOffset
+                 && existing.layout == candidate.layout
+                 && std::abs(existing.fovY - candidate.fovY) < 0.25f
+                 && std::abs(existing.aspect - candidate.aspect) < 0.01f) {
+                  uint64_t oldHits = existing.hits;
+                  existing = candidate;
+                  existing.hits = oldHits + 1;
+                  return;
+                }
+              }
+
+              g_chimeraProjectionCandidates.push_back(candidate);
+              std::sort(g_chimeraProjectionCandidates.begin(), g_chimeraProjectionCandidates.end(), [] (const auto& a, const auto& b) {
+                if (a.score != b.score)
+                  return a.score > b.score;
+                return a.hits > b.hits;
+              });
+              if (g_chimeraProjectionCandidates.size() > 24)
+                g_chimeraProjectionCandidates.resize(24);
+            }
+
+            void chimeraWriteProjectionLocked() {
+              auto now = std::chrono::steady_clock::now();
+              if (now - g_chimeraProjectionLastWrite < std::chrono::milliseconds(250))
+                return;
+              g_chimeraProjectionLastWrite = now;
+
+              auto candidates = g_chimeraProjectionCandidates;
+              std::sort(candidates.begin(), candidates.end(), [] (const auto& a, const auto& b) {
+                if (a.score != b.score)
+                  return a.score > b.score;
+                return a.hits > b.hits;
+              });
+
+              std::ofstream file(chimeraProjectionPath(), std::ios::trunc);
+              if (!file)
+                return;
+
+              file << "marker=" << g_chimeraProjectionMarker << "\n";
+              file << "runtime=1\n";
+              file << "candidate_count=" << candidates.size() << "\n";
+              file << std::fixed << std::setprecision(6);
+
+              size_t limit = std::min<size_t>(candidates.size(), 10u);
+              for (size_t i = 0; i < limit; i++) {
+                const auto& c = candidates[i];
+                file << "candidate" << i << "="
+                     << "score=" << c.score
+                     << ",slot=" << c.slot
+                     << ",bytes=" << c.bytes
+                     << ",float_offset=" << c.floatOffset
+                     << ",layout=" << (c.layout ? "transpose" : "native")
+                     << ",fovy=" << c.fovY
+                     << ",aspect=" << c.aspect
+                     << ",m00=" << c.m00
+                     << ",m11=" << c.m11
+                     << ",m22=" << c.m22
+                     << ",m23=" << c.p23
+                     << ",m32=" << c.p32
+                     << ",m33=" << c.m33
+                     << ",reversed_hint=" << (std::abs(c.m22) < 0.08f ? 1 : 0)
+                     << ",hits=" << c.hits << "\n";
+              }
+            }
+
+            void chimeraProbeProjectionBuffers(
+                    UINT StartSlot,
+                    UINT NumBuffers,
+                    ID3D11Buffer* const* ppConstantBuffers) {
+              if (!ppConstantBuffers || !NumBuffers)
+                return;
+
+              auto now = std::chrono::steady_clock::now();
+              std::lock_guard<std::mutex> lock(g_chimeraProjectionMutex);
+              if (now - g_chimeraProjectionLastScan < std::chrono::milliseconds(20))
+                return;
+              g_chimeraProjectionLastScan = now;
+
+              for (UINT i = 0; i < NumBuffers; i++) {
+                auto* iface = ppConstantBuffers[i];
+                if (!iface)
+                  continue;
+
+                auto* buffer = static_cast<D3D11Buffer*>(iface);
+                const auto* desc = buffer->Desc();
+                if (!desc || !(desc->BindFlags & D3D11_BIND_CONSTANT_BUFFER))
+                  continue;
+                if (desc->ByteWidth < 64 || desc->ByteWidth > 16384)
+                  continue;
+
+                const void* ptr = buffer->GetMapPtr();
+                if (!ptr)
+                  continue;
+
+                const float* values = static_cast<const float*>(ptr);
+                uint32_t floatCount = desc->ByteWidth / sizeof(float);
+
+                // Constant-buffer members are 16-byte aligned. Scan every float4
+                // boundary for a possible 4x4 perspective matrix.
+                for (uint32_t off = 0; off + 16 <= floatCount; off += 4) {
+                  ChimeraProjectionCandidate nativeCandidate;
+                  if (chimeraScoreProjection(values + off, false, StartSlot + i, desc->ByteWidth, off, nativeCandidate))
+                    chimeraStoreProjectionLocked(nativeCandidate);
+
+                  ChimeraProjectionCandidate transposeCandidate;
+                  if (chimeraScoreProjection(values + off, true, StartSlot + i, desc->ByteWidth, off, transposeCandidate))
+                    chimeraStoreProjectionLocked(transposeCandidate);
+                }
+              }
+
+              chimeraWriteProjectionLocked();
+            }
+
+          }
+          '''
+          if ns_anchor not in s:
+              raise SystemExit('namespace anchor missing')
+          s = s.replace(ns_anchor, ns_anchor + helper, 1)
+
+          # Probe the CPU-visible contents of VS constant buffers at bind time.
+          # This catches the common dynamic-CB path without GPU readback/stalls.
+          pattern = re.compile(
+              r'(void STDMETHODCALLTYPE D3D11CommonContext<ContextType>::VSSetConstantBuffers\(\s*'
+              r'UINT\s+StartSlot,\s*'
+              r'UINT\s+NumBuffers,\s*'
+              r'ID3D11Buffer\* const\*\s+ppConstantBuffers\) \{\s*'
+              r'D3D10DeviceLock lock = LockContext\(\);)'
+          )
+          m = pattern.search(s)
+          if not m:
+              raise SystemExit('VSSetConstantBuffers implementation anchor missing')
+          replacement = m.group(1) + '\n\n    chimeraProbeProjectionBuffers(StartSlot, NumBuffers, ppConstantBuffers);'
+          s = s[:m.start()] + replacement + s[m.end():]
+
+          # Also cover D3D11.1 range-bound constant buffers if the game uses them.
+          pattern1 = re.compile(
+              r'(void STDMETHODCALLTYPE D3D11CommonContext<ContextType>::VSSetConstantBuffers1\(\s*'
+              r'UINT\s+StartSlot,\s*'
+              r'UINT\s+NumBuffers,\s*'
+              r'ID3D11Buffer\* const\*\s+ppConstantBuffers,\s*'
+              r'const UINT\*\s+pFirstConstant,\s*'
+              r'const UINT\*\s+pNumConstants\) \{\s*'
+              r'D3D10DeviceLock lock = LockContext\(\);)'
+          )
+          m1 = pattern1.search(s)
+          if m1:
+              replacement1 = m1.group(1) + '\n\n    chimeraProbeProjectionBuffers(StartSlot, NumBuffers, ppConstantBuffers);'
+              s = s[:m1.start()] + replacement1 + s[m1.end():]
+
+          p.write_text(s, encoding='utf-8')
+          print('CHIMERA_PROJECTION_V8 patch: PASS')
+          PYIN
+
+          grep -n 'CHIMERA_PROJECTION_V8' src/d3d11/d3d11_context.cpp
+          grep -n 'chimeraProbeProjectionBuffers' src/d3d11/d3d11_context.cpp
+
+      - name: Build DXVK x64 and x32
+        working-directory: dxvk
+        run: |
+          export VERSION_NAME="chimera-dxvk-projection-probe-v8"
+          ./package-release.sh "$VERSION_NAME" build --no-package
+
+      - name: Verify and package runtime
+        working-directory: dxvk
+        run: |
+          set -euxo pipefail
+          root="build/dxvk-chimera-dxvk-projection-probe-v8"
+          test -f "$root/x64/d3d11.dll"
+          test -f "$root/x64/dxgi.dll"
+          test -f "$root/x32/d3d11.dll"
+          test -f "$root/x32/dxgi.dll"
+          strings "$root/x64/d3d11.dll" | grep -q CHIMERA_DXVK_PROBE_V1
+          strings "$root/x64/d3d11.dll" | grep -q CHIMERA_DSV_CREATE_V1
+          strings "$root/x64/d3d11.dll" | grep -q CHIMERA_PROJECTION_V8
+          mkdir -p ../runtime_bundle
+          cp "$root/x64/d3d11.dll" ../runtime_bundle/d3d11_64.dll
+          cp "$root/x64/dxgi.dll"  ../runtime_bundle/dxgi_64.dll
+          cp "$root/x32/d3d11.dll" ../runtime_bundle/d3d11_32.dll
+          cp "$root/x32/dxgi.dll"  ../runtime_bundle/dxgi_32.dll
+          cp LICENSE ../runtime_bundle/DXVK-LICENSE
+          sha256sum ../runtime_bundle/*.dll
+
+      - name: Upload DXVK runtime
+        uses: actions/upload-artifact@v7
+        with:
+          name: chimera-dxvk-projection-probe-v8-runtime
+          path: runtime_bundle
+          compression-level: 0
+          if-no-files-found: error
