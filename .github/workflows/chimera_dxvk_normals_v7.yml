@@ -1,0 +1,138 @@
+name: Chimera DXVK Normals v7
+
+on:
+  push:
+    branches:
+      - chimera-amd-nr
+    paths:
+      - '.github/workflows/chimera_dxvk_normals_v7.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-dxvk:
+    name: Build DXVK depth-derived normals visualizer
+    runs-on: ubuntu-latest
+    container: archlinux/archlinux:base-devel
+
+    steps:
+      - name: Install build dependencies
+        run: pacman -Syu --needed --noconfirm git meson mingw-w64-gcc glslang python python-yaml
+
+      - name: Clone Chimera source and pinned DXVK
+        run: |
+          git clone --branch chimera-amd-nr --single-branch https://github.com/doubledd1403-hue/OptiScaler_DLSSNR.git chimera-source
+          git clone https://github.com/doitsujin/dxvk.git dxvk
+          cd dxvk
+          git checkout d7ac2580aa274a14a500e74edbe4ec6aae250e4a
+          git submodule update --init --recursive
+
+      - name: Reuse V1 renderer probe
+        run: |
+          python3 - <<'PYIN'
+          import yaml
+          from pathlib import Path
+          wf = yaml.safe_load(Path('chimera-source/.github/workflows/chimera_dxvk_probe_v1.yml').read_text())
+          step = next(s for s in wf['jobs']['build-dxvk']['steps'] if s.get('name') == 'Add Chimera DXVK depth probe')
+          Path('/tmp/chimera_v1.sh').write_text(step['run'])
+          PYIN
+          cd dxvk
+          bash /tmp/chimera_v1.sh
+
+      - name: Reuse V2 heartbeat expansion
+        run: |
+          python3 - <<'PYIN'
+          import yaml
+          from pathlib import Path
+          wf = yaml.safe_load(Path('chimera-source/.github/workflows/chimera_dxvk_probe_v2_fix.yml').read_text())
+          step = next(s for s in wf['jobs']['build-dxvk']['steps'] if s.get('name') == 'Expand probe heartbeat and DSV capture paths')
+          Path('/tmp/chimera_v2.sh').write_text(step['run'])
+          PYIN
+          cd dxvk
+          bash /tmp/chimera_v2.sh
+
+      - name: Reuse V4 CreateDepthStencilView enumeration
+        run: |
+          python3 - <<'PYIN'
+          import yaml
+          from pathlib import Path
+          wf = yaml.safe_load(Path('chimera-source/.github/workflows/chimera_dxvk_depth_create_v4.yml').read_text())
+          step = next(s for s in wf['jobs']['build-dxvk']['steps'] if s.get('name') == 'Add CreateDepthStencilView enumeration')
+          Path('/tmp/chimera_v4.sh').write_text(step['run'])
+          PYIN
+          cd dxvk
+          bash /tmp/chimera_v4.sh
+
+      - name: Reuse V5 proven scene-depth selection
+        run: |
+          python3 - <<'PYIN'
+          import yaml
+          from pathlib import Path
+          wf = yaml.safe_load(Path('chimera-source/.github/workflows/chimera_dxvk_raw_depth_v5.yml').read_text())
+          step = next(s for s in wf['jobs']['build-dxvk']['steps'] if s.get('name') == 'Add renderer-side raw depth presentation')
+          Path('/tmp/chimera_v5.sh').write_text(step['run'])
+          PYIN
+          cd dxvk
+          bash /tmp/chimera_v5.sh
+
+      - name: Add V6 upright grayscale depth decoder
+        working-directory: dxvk
+        run: |
+          echo 'ZnJvbSBwYXRobGliIGltcG9ydCBQYXRoCgojIFY2IGFkZHMgYSByZWFsIGRlcHRoLWRpc3BsYXkgcGF0aCB0byBEWFZLJ3Mgc3dhcGNoYWluIGJsaXR0ZXIuCiMgVjUgcHJvdmVkIHRoZSBzZWxlY3RlZCByZXNvdXJjZSBpcyBzY2VuZSBkZXB0aCwgYnV0IGZlZCBpdCB0aHJvdWdoIHRoZSBub3JtYWwKIyBjb2xvdXIgcHJlc2VudGF0aW9uIHNoYWRlci4gVjYgZGV0ZWN0cyBhIGRlcHRoLWFzcGVjdCBzb3VyY2UgYW5kIGV4cGxpY2l0bHkKIyBjb252ZXJ0cyB0aGUgc2FtcGxlZCBkZXB0aCB2YWx1ZSB0byB1cHJpZ2h0IGdyYXlzY2FsZSB3aXRoIGNvbnRyYXN0IGV4cGFuc2lvbi4KCiMgMSkgQWRkIGEgcGlwZWxpbmUta2V5IGJpdCBhbmQgc3BlY2lhbGl6YXRpb24gY29uc3RhbnQuCnAgPSBQYXRoKCdzcmMvZHh2ay9keHZrX3N3YXBjaGFpbl9ibGl0dGVyLmgnKQpzID0gcC5yZWFkX3RleHQoZW5jb2Rpbmc9J3V0Zi04JykKCmFuY2hvciA9ICcgICAgLy8vIEJpdCBpbmRpY2F0aW5nIHdoZXRoZXIgdGhlIHNvZnR3YXJlIGN1cnNvciBuZWVkcyB0byBiZSBjb21wb3NpdGVkXG4gICAgVmtCb29sMzIgY29tcG9zaXRlQ3Vyc29yID0gVktfRkFMU0U7XG4nCmluc2VydCA9IGFuY2hvciArICcgICAgLy8vIENoaW1lcmEgZGlhZ25vc3RpYzogc291cmNlIHZpZXcgaXMgc2NlbmUgZGVwdGggYW5kIG5lZWRzIGdyYXlzY2FsZSBkZWNvZGluZy5cbiAgICBWa0Jvb2wzMiBjaGltZXJhRGVwdGggPSBWS19GQUxTRTtcbicKaWYgYW5jaG9yIG5vdCBpbiBzOgogICAgcmFpc2UgU3lzdGVtRXhpdCgnYmxpdHRlci5oIGtleSBhbmNob3IgbWlzc2luZycpCnMgPSBzLnJlcGxhY2UoYW5jaG9yLCBpbnNlcnQsIDEpCgphbmNob3IgPSAnICAgICAgaGFzaC5hZGQodWludDMyX3QoY29tcG9zaXRlQ3Vyc29yKSk7XG4nCmluc2VydCA9IGFuY2hvciArICcgICAgICBoYXNoLmFkZCh1aW50MzJfdChjaGltZXJhRGVwdGgpKTtcbicKaWYgYW5jaG9yIG5vdCBpbiBzOgogICAgcmFpc2UgU3lzdGVtRXhpdCgnYmxpdHRlci5oIGhhc2ggYW5jaG9yIG1pc3NpbmcnKQpzID0gcy5yZXBsYWNlKGFuY2hvciwgaW5zZXJ0LCAxKQoKYW5jaG9yID0gJyAgICAgICAgICAmJiBjb21wb3NpdGVIdWQgPT0gb3RoZXIuY29tcG9zaXRlSHVkXG4gICAgICAgICAgJiYgY29tcG9zaXRlQ3Vyc29yID09IG90aGVyLmNvbXBvc2l0ZUN1cnNvcjtcbicKaW5zZXJ0ID0gJyAgICAgICAgICAmJiBjb21wb3NpdGVIdWQgPT0gb3RoZXIuY29tcG9zaXRlSHVkXG4gICAgICAgICAgJiYgY29tcG9zaXRlQ3Vyc29yID09IG90aGVyLmNvbXBvc2l0ZUN1cnNvclxuICAgICAgICAgICYmIGNoaW1lcmFEZXB0aCA9PSBvdGhlci5jaGltZXJhRGVwdGg7XG4nCmlmIGFuY2hvciBub3QgaW4gczoKICAgIHJhaXNlIFN5c3RlbUV4aXQoJ2JsaXR0ZXIuaCBlcSBhbmNob3IgbWlzc2luZycpCnMgPSBzLnJlcGxhY2UoYW5jaG9yLCBpbnNlcnQsIDEpCgphbmNob3IgPSAnICAgICAgVmtCb29sMzIgY29tcG9zaXRlSHVkO1xuICAgICAgVmtCb29sMzIgY29tcG9zaXRlQ3Vyc29yO1xuJwppbnNlcnQgPSBhbmNob3IgKyAnICAgICAgVmtCb29sMzIgY2hpbWVyYURlcHRoO1xuJwppZiBhbmNob3Igbm90IGluIHM6CiAgICByYWlzZSBTeXN0ZW1FeGl0KCdibGl0dGVyLmggc3BlYyBjb25zdGFudHMgYW5jaG9yIG1pc3NpbmcnKQpzID0gcy5yZXBsYWNlKGFuY2hvciwgaW5zZXJ0LCAxKQpwLndyaXRlX3RleHQocywgZW5jb2Rpbmc9J3V0Zi04JykKCiMgMikgTWFyayBkZXB0aC1zb3VyY2UgcGlwZWxpbmVzIGluIEMrKywgcGFzcyBzcGVjaWFsaXphdGlvbiBjb25zdGFudCA4LgpwID0gUGF0aCgnc3JjL2R4dmsvZHh2a19zd2FwY2hhaW5fYmxpdHRlci5jcHAnKQpzID0gcC5yZWFkX3RleHQoZW5jb2Rpbmc9J3V0Zi04JykKCmFuY2hvciA9ICcgICAga2V5LmNvbXBvc2l0ZUh1ZCA9IGNvbXBvc2l0ZSAmJiBtX2h1ZFNydjtcbiAgICBrZXkuY29tcG9zaXRlQ3Vyc29yID0gY29tcG9zaXRlICYmIG1fY3Vyc29yVmlldztcbicKcmVwbGFjZSA9IGFuY2hvciArICcgICAga2V5LmNoaW1lcmFEZXB0aCA9IChzcmNWaWV3LT5pbmZvKCkuYXNwZWN0cyAmIFZLX0lNQUdFX0FTUEVDVF9ERVBUSF9CSVQpID8gVktfVFJVRSA6IFZLX0ZBTFNFO1xuJwppZiBhbmNob3Igbm90IGluIHM6CiAgICByYWlzZSBTeXN0ZW1FeGl0KCdibGl0dGVyLmNwcCBwaXBlbGluZSBrZXkgYW5jaG9yIG1pc3NpbmcnKQpzID0gcy5yZXBsYWNlKGFuY2hvciwgcmVwbGFjZSwgMSkKCmFuY2hvciA9ICcgICAgc3RhdGljIGNvbnN0IHN0ZDo6YXJyYXk8VmtTcGVjaWFsaXphdGlvbk1hcEVudHJ5LCA4PiBzcGVjTWFwID0ge3tcbicKcmVwbGFjZSA9ICcgICAgc3RhdGljIGNvbnN0IHN0ZDo6YXJyYXk8VmtTcGVjaWFsaXphdGlvbk1hcEVudHJ5LCA5PiBzcGVjTWFwID0ge3tcbicKaWYgYW5jaG9yIG5vdCBpbiBzOgogICAgcmFpc2UgU3lzdGVtRXhpdCgnYmxpdHRlci5jcHAgc3BlY01hcCBzaXplIGFuY2hvciBtaXNzaW5nJykKcyA9IHMucmVwbGFjZShhbmNob3IsIHJlcGxhY2UsIDEpCgphbmNob3IgPSAnICAgICAgeyA3LCBvZmZzZXRvZihTcGVjQ29uc3RhbnRzLCBjb21wb3NpdGVDdXJzb3IpLHNpemVvZihWa0Jvb2wzMikgfSxcbiAgICB9fTtcbicKcmVwbGFjZSA9ICcgICAgICB7IDcsIG9mZnNldG9mKFNwZWNDb25zdGFudHMsIGNvbXBvc2l0ZUN1cnNvciksc2l6ZW9mKFZrQm9vbDMyKSB9LFxuICAgICAgeyA4LCBvZmZzZXRvZihTcGVjQ29uc3RhbnRzLCBjaGltZXJhRGVwdGgpLCAgICBzaXplb2YoVmtCb29sMzIpIH0sXG4gICAgfX07XG4nCmlmIGFuY2hvciBub3QgaW4gczoKICAgIHJhaXNlIFN5c3RlbUV4aXQoJ2JsaXR0ZXIuY3BwIHNwZWNNYXAgdGFpbCBhbmNob3IgbWlzc2luZycpCnMgPSBzLnJlcGxhY2UoYW5jaG9yLCByZXBsYWNlLCAxKQoKYW5jaG9yID0gJyAgICBzcGVjQ29uc3RhbnRzLmNvbXBvc2l0ZUN1cnNvciA9IGtleS5jb21wb3NpdGVDdXJzb3I7XG4gICAgc3BlY0NvbnN0YW50cy5jb21wb3NpdGVIdWQgPSBrZXkuY29tcG9zaXRlSHVkO1xuJwpyZXBsYWNlID0gYW5jaG9yICsgJyAgICBzcGVjQ29uc3RhbnRzLmNoaW1lcmFEZXB0aCA9IGtleS5jaGltZXJhRGVwdGg7XG4nCmlmIGFuY2hvciBub3QgaW4gczoKICAgIHJhaXNlIFN5c3RlbUV4aXQoJ2JsaXR0ZXIuY3BwIHNwZWMgY29uc3RhbnQgYXNzaWdubWVudCBhbmNob3IgbWlzc2luZycpCnMgPSBzLnJlcGxhY2UoYW5jaG9yLCByZXBsYWNlLCAxKQoKIyBOZXZlciBsZXQgdGhlIG9yZGluYXJ5IGNvbG91ci1zcGFjZSBmYXN0IHBhdGggYWx0ZXIgZGVwdGggZGVidWcgc2VtYW50aWNzLgphbmNob3IgPSAnICAgIGlmIChrZXkuc3JjU3BhY2UgPT0ga2V5LmRzdFNwYWNlICYmIGtleS5zcmNTYW1wbGVzID09IFZLX1NBTVBMRV9DT1VOVF8xX0JJVFxuICAgICAmJiAha2V5LmNvbXBvc2l0ZUN1cnNvciAmJiAha2V5LmNvbXBvc2l0ZUh1ZCkge1xuJwpyZXBsYWNlID0gJyAgICBpZiAoIWtleS5jaGltZXJhRGVwdGggJiYga2V5LnNyY1NwYWNlID09IGtleS5kc3RTcGFjZSAmJiBrZXkuc3JjU2FtcGxlcyA9PSBWS19TQU1QTEVfQ09VTlRfMV9CSVRcbiAgICAgJiYgIWtleS5jb21wb3NpdGVDdXJzb3IgJiYgIWtleS5jb21wb3NpdGVIdWQpIHtcbicKaWYgYW5jaG9yIG5vdCBpbiBzOgogICAgcmFpc2UgU3lzdGVtRXhpdCgnYmxpdHRlci5jcHAgY29sb3VyIGZhc3QtcGF0aCBhbmNob3IgbWlzc2luZycpCnMgPSBzLnJlcGxhY2UoYW5jaG9yLCByZXBsYWNlLCAxKQpwLndyaXRlX3RleHQocywgZW5jb2Rpbmc9J3V0Zi04JykKCiMgMykgQWRkIHNwZWNpYWxpemF0aW9uIGNvbnN0YW50IHRvIHRoZSBzaGFyZWQgcHJlc2VudCBzaGFkZXIgZGVjbGFyYXRpb25zLgpwID0gUGF0aCgnc3JjL2R4dmsvc2hhZGVycy9keHZrX3ByZXNlbnRfY29tbW9uLmdsc2wnKQpzID0gcC5yZWFkX3RleHQoZW5jb2Rpbmc9J3V0Zi04JykKYW5jaG9yID0gJ2xheW91dChjb25zdGFudF9pZCA9IDcpIGNvbnN0IGJvb2wgY19jb21wb3NpdGVfY3Vyc29yID0gZmFsc2U7XG4nCnJlcGxhY2UgPSBhbmNob3IgKyAnbGF5b3V0KGNvbnN0YW50X2lkID0gOCkgY29uc3QgYm9vbCBjX2NoaW1lcmFfZGVwdGggPSBmYWxzZTtcbicKaWYgYW5jaG9yIG5vdCBpbiBzOgogICAgcmFpc2UgU3lzdGVtRXhpdCgncHJlc2VudF9jb21tb24gY29uc3RhbnQgYW5jaG9yIG1pc3NpbmcnKQpzID0gcy5yZXBsYWNlKGFuY2hvciwgcmVwbGFjZSwgMSkKcC53cml0ZV90ZXh0KHMsIGVuY29kaW5nPSd1dGYtOCcpCgojIDQpIE5vbi1zY2FsaW5nIHByZXNlbnQgc2hhZGVyOiBleHBsaWNpdCBkZXB0aC1hc3BlY3QgZGVjb2RlLCB2ZXJ0aWNhbCBmbGlwLCBncmF5c2NhbGUuCnAgPSBQYXRoKCdzcmMvZHh2ay9zaGFkZXJzL2R4dmtfcHJlc2VudF9mcmFnLmZyYWcnKQpzID0gcC5yZWFkX3RleHQoZW5jb2Rpbmc9J3V0Zi04JykKb2xkID0gJycndm9pZCBtYWluKCkgewogIGl2ZWMyIGNvb3JkID0gaXZlYzIoZ2xfRnJhZ0Nvb3JkLnh5KSArIHNyY19vZmZzZXQgLSBkc3Rfb2Zmc2V0OwoKICBvX2NvbG9yID0gaW5wdXRfdG9fc2NfcmdiKHRleGVsRmV0Y2goc19pbWFnZSwgY29vcmQsIDApKTsKICBvX2NvbG9yID0gY29tcG9zaXRlX2ltYWdlKG9fY29sb3IpOwogIG9fY29sb3IgPSBzY19yZ2JfdG9fb3V0cHV0KG9fY29sb3IpOwp9CicnJwpuZXcgPSAnJyd2b2lkIG1haW4oKSB7CiAgaXZlYzIgY29vcmQgPSBpdmVjMihnbF9GcmFnQ29vcmQueHkpICsgc3JjX29mZnNldCAtIGRzdF9vZmZzZXQ7CgogIGlmIChjX2NoaW1lcmFfZGVwdGgpIHsKICAgIC8vIFY1IHByb3ZlZCB0aGlzIGlzIGEgcmVhbCBzY2VuZS1kZXB0aCB0ZXh0dXJlLiBTYW1wbGUgdGhlIGRlcHRoIGFzcGVjdCBhcyBSLAogICAgLy8gdW5kbyB0aGUgdmVydGljYWwgb3JpZW50YXRpb24gbWlzbWF0Y2gsIHRoZW4gZXhwYW5kIGxvdyByZXZlcnNlZC1aIHZhbHVlcwogICAgLy8gZm9yIHZpc2liaWxpdHkuIFRoaXMgaXMgYSBkaWFnbm9zdGljIGRpc3BsYXkgdHJhbnNmb3JtLCBub3QgbGluZWFyaXplZCBaLgogICAgaW50IGxvY2FsX3kgPSBjb29yZC55IC0gc3JjX29mZnNldC55OwogICAgY29vcmQueSA9IHNyY19vZmZzZXQueSArIGludChzcmNfZXh0ZW50LnkpIC0gMSAtIGxvY2FsX3k7CiAgICBjb29yZCA9IGNsYW1wKGNvb3JkLCBzcmNfb2Zmc2V0LCBzcmNfb2Zmc2V0ICsgaXZlYzIoc3JjX2V4dGVudCkgLSBpdmVjMigxKSk7CgogICAgZmxvYXQgZGVwdGhfcmF3ID0gY2xhbXAodGV4ZWxGZXRjaChzX2ltYWdlLCBjb29yZCwgMCkuciwgMC4wLCAxLjApOwogICAgZmxvYXQgZGVwdGhfdmlzID0gcG93KGRlcHRoX3JhdywgMC4yNSk7CiAgICBvX2NvbG9yID0gdmVjNChkZXB0aF92aXMsIGRlcHRoX3ZpcywgZGVwdGhfdmlzLCAxLjApOwogICAgcmV0dXJuOwogIH0KCiAgb19jb2xvciA9IGlucHV0X3RvX3NjX3JnYih0ZXhlbEZldGNoKHNfaW1hZ2UsIGNvb3JkLCAwKSk7CiAgb19jb2xvciA9IGNvbXBvc2l0ZV9pbWFnZShvX2NvbG9yKTsKICBvX2NvbG9yID0gc2NfcmdiX3RvX291dHB1dChvX2NvbG9yKTsKfQonJycKaWYgb2xkIG5vdCBpbiBzOgogICAgcmFpc2UgU3lzdGVtRXhpdCgncHJlc2VudF9mcmFnIG1haW4gYW5jaG9yIG1pc3NpbmcnKQpzID0gcy5yZXBsYWNlKG9sZCwgbmV3LCAxKQpwLndyaXRlX3RleHQocywgZW5jb2Rpbmc9J3V0Zi04JykKCiMgNSkgU2NhbGluZyBwcmVzZW50IHNoYWRlcjogc2FtZSBkZWNvZGVyIHVzaW5nIG5vcm1hbGl6ZWQgc291cmNlIGNvb3JkaW5hdGVzLgpwID0gUGF0aCgnc3JjL2R4dmsvc2hhZGVycy9keHZrX3ByZXNlbnRfZnJhZ19ibGl0LmZyYWcnKQpzID0gcC5yZWFkX3RleHQoZW5jb2Rpbmc9J3V0Zi04JykKYW5jaG9yID0gJycndm9pZCBtYWluKCkgewogIHZlYzIgY29vcmQgPSB2ZWMyKHNyY19vZmZzZXQpICsgdmVjMihzcmNfZXh0ZW50KSAqIGlfY29vcmQ7CiAgdmVjMiBkZWx0YSA9IHZlYzIoZEZkeChjb29yZC54KSwgZEZkeShjb29yZC55KSk7CicnJwpyZXBsYWNlID0gJycndm9pZCBtYWluKCkgewogIGlmIChjX2NoaW1lcmFfZGVwdGgpIHsKICAgIC8vIFRoZSBub3JtYWwgc3dhcGNoYWluIGJsaXQgaXMgdmVydGljYWxseSBvcmllbnRlZCBmb3IgY29sb3VyIHByZXNlbnRhdGlvbjsKICAgIC8vIHRoZSBjYXB0dXJlZCBEM0QxMSBkZXB0aCB2aWV3IGlzIG9wcG9zaXRlIGluIFY1LCBzbyBmbGlwIFkgZGVsaWJlcmF0ZWx5LgogICAgdmVjMiBkZXB0aF91diA9IHZlYzIoaV9jb29yZC54LCAxLjAgLSBpX2Nvb3JkLnkpOwogICAgdmVjMiBkZXB0aF9jb29yZF9mID0gdmVjMihzcmNfb2Zmc2V0KSArIHZlYzIoc3JjX2V4dGVudCkgKiBkZXB0aF91djsKICAgIGl2ZWMyIGRlcHRoX2Nvb3JkID0gaXZlYzIoZmxvb3IoZGVwdGhfY29vcmRfZikpOwogICAgZGVwdGhfY29vcmQgPSBjbGFtcChkZXB0aF9jb29yZCwgc3JjX29mZnNldCwgc3JjX29mZnNldCArIGl2ZWMyKHNyY19leHRlbnQpIC0gaXZlYzIoMSkpOwoKICAgIGZsb2F0IGRlcHRoX3JhdyA9IGNsYW1wKHRleGVsRmV0Y2goc19pbWFnZSwgZGVwdGhfY29vcmQsIDApLnIsIDAuMCwgMS4wKTsKICAgIGZsb2F0IGRlcHRoX3ZpcyA9IHBvdyhkZXB0aF9yYXcsIDAuMjUpOwogICAgb19jb2xvciA9IHZlYzQoZGVwdGhfdmlzLCBkZXB0aF92aXMsIGRlcHRoX3ZpcywgMS4wKTsKICAgIHJldHVybjsKICB9CgogIHZlYzIgY29vcmQgPSB2ZWMyKHNyY19vZmZzZXQpICsgdmVjMihzcmNfZXh0ZW50KSAqIGlfY29vcmQ7CiAgdmVjMiBkZWx0YSA9IHZlYzIoZEZkeChjb29yZC54KSwgZEZkeShjb29yZC55KSk7CicnJwppZiBhbmNob3Igbm90IGluIHM6CiAgICByYWlzZSBTeXN0ZW1FeGl0KCdwcmVzZW50X2ZyYWdfYmxpdCBtYWluIGFuY2hvciBtaXNzaW5nJykKcyA9IHMucmVwbGFjZShhbmNob3IsIHJlcGxhY2UsIDEpCnAud3JpdGVfdGV4dChzLCBlbmNvZGluZz0ndXRmLTgnKQoKcHJpbnQoJ0NoaW1lcmEgVjYgZGVwdGggZGVjb2RlciBwYXRjaDogUEFTUycpCg==' | base64 -d > /tmp/chimera_v6_patch.py
+          python3 /tmp/chimera_v6_patch.py
+          grep -n 'chimeraDepth' src/dxvk/dxvk_swapchain_blitter.h | head
+          grep -n 'chimeraDepth' src/dxvk/dxvk_swapchain_blitter.cpp | head
+          grep -n 'c_chimera_depth' src/dxvk/shaders/dxvk_present_common.glsl
+          grep -n 'depth_vis' src/dxvk/shaders/dxvk_present_frag.frag
+          grep -n 'depth_vis' src/dxvk/shaders/dxvk_present_frag_blit.frag
+
+      - name: Add V7 depth-derived normal reconstruction
+        working-directory: dxvk
+        run: |
+          echo 'ZnJvbSBwYXRobGliIGltcG9ydCBQYXRoCgojIFY3IGtlZXBzIFY2IHNjZW5lLWRlcHRoIHNlbGVjdGlvbiBidXQgcmVwbGFjZXMgZ3JheXNjYWxlIHByZXNlbnRhdGlvbiB3aXRoCiMgZGVwdGgtZGVyaXZlZCBub3JtYWxzLiBZb29rYSBWNiBwcm92ZWQgcmV2ZXJzZWQtWiAobmVhciA9IGJyaWdodGVyL2xhcmdlcikuCgpwID0gUGF0aCgnc3JjL2R4dmsvc2hhZGVycy9keHZrX3ByZXNlbnRfY29tbW9uLmdsc2wnKQpzID0gcC5yZWFkX3RleHQoZW5jb2Rpbmc9J3V0Zi04JykKYW5jaG9yID0gIiIibGF5b3V0KHB1c2hfY29uc3RhbnQpCnVuaWZvcm0gcHJlc2VudF9pbmZvX3QgewogIGl2ZWMyIHNyY19vZmZzZXQ7CiAgaXZlYzIgc3JjX2V4dGVudDsKICBpdmVjMiBkc3Rfb2Zmc2V0OwogIGl2ZWMyIGN1cnNvcl9vZmZzZXQ7CiAgaXZlYzIgY3Vyc29yX2V4dGVudDsKICB1aW50IHNhbXBsZXJfZ2FtbWE7CiAgdWludCBzYW1wbGVyX2N1cnNvcjsKfTsKIiIiCmhlbHBlcnMgPSBhbmNob3IgKyByJycnCgovLyBDSElNRVJBX05PUk1BTFNfVjcKaXZlYzIgY2hpbWVyYV9kZXB0aF9jb29yZChpdmVjMiBkaXNwbGF5X2Nvb3JkKSB7CiAgaXZlYzIgbG8gPSBzcmNfb2Zmc2V0OwogIGl2ZWMyIGhpID0gc3JjX29mZnNldCArIGl2ZWMyKHNyY19leHRlbnQpIC0gaXZlYzIoMSk7CiAgZGlzcGxheV9jb29yZCA9IGNsYW1wKGRpc3BsYXlfY29vcmQsIGxvLCBoaSk7CgogIGludCBsb2NhbF95ID0gZGlzcGxheV9jb29yZC55IC0gc3JjX29mZnNldC55OwogIGl2ZWMyIHNhbXBsZV9jb29yZCA9IGRpc3BsYXlfY29vcmQ7CiAgc2FtcGxlX2Nvb3JkLnkgPSBzcmNfb2Zmc2V0LnkgKyBpbnQoc3JjX2V4dGVudC55KSAtIDEgLSBsb2NhbF95OwogIHJldHVybiBjbGFtcChzYW1wbGVfY29vcmQsIGxvLCBoaSk7Cn0KCmZsb2F0IGNoaW1lcmFfZGVwdGhfcmF3KGl2ZWMyIGRpc3BsYXlfY29vcmQpIHsKICByZXR1cm4gY2xhbXAodGV4ZWxGZXRjaChzX2ltYWdlLCBjaGltZXJhX2RlcHRoX2Nvb3JkKGRpc3BsYXlfY29vcmQpLCAwKS5yLCAwLjAsIDEuMCk7Cn0KCnZlYzMgY2hpbWVyYV92aWV3X3BvcyhpdmVjMiBkaXNwbGF5X2Nvb3JkLCBmbG9hdCBkZXB0aF9yYXcpIHsKICB2ZWMyIGxvY2FsID0gdmVjMihkaXNwbGF5X2Nvb3JkIC0gc3JjX29mZnNldCkgKyB2ZWMyKDAuNSk7CiAgdmVjMiB1diA9IGxvY2FsIC8gbWF4KHZlYzIoc3JjX2V4dGVudCksIHZlYzIoMS4wKSk7CgogIC8vIFJldmVyc2VkLVo6IGRpc3RhbmNlIGlzIHByb3BvcnRpb25hbCB0byAxL2RlcHRoLiBVbmtub3duIG5lYXItcGxhbmUgc2NhbGUKICAvLyBjYW5jZWxzIHdoZW4gbm9ybWFsaXppbmcgdGhlIGNyb3NzIHByb2R1Y3QgdXNlZCBmb3Igbm9ybWFscy4KICBmbG9hdCB6ID0gMS4wIC8gbWF4KGRlcHRoX3JhdywgMS4wZS01KTsKICB6ID0gbWluKHosIDEwMDAwMC4wKTsKCiAgdmVjMiBuZGMgPSB2ZWMyKHV2LnggKiAyLjAgLSAxLjAsIDEuMCAtIHV2LnkgKiAyLjApOwogIGZsb2F0IGFzcGVjdCA9IGZsb2F0KHNyY19leHRlbnQueCkgLyBtYXgoZmxvYXQoc3JjX2V4dGVudC55KSwgMS4wKTsKCiAgLy8gTmV1dHJhbCBwcm9qZWN0aW9uIHNjYWxlIGZvciB0aGlzIGRpYWdub3N0aWMgc3RhZ2UuIEl0IHlpZWxkcyBjb2hlcmVudAogIC8vIHN1cmZhY2Ugb3JpZW50YXRpb247IGV4YWN0IHByb2plY3Rpb24gY2FwdHVyZSBpcyBhIGxhdGVyIGdlbmVyaWNpemF0aW9uIHN0ZXAuCiAgcmV0dXJuIHZlYzMobmRjLnggKiBhc3BlY3QgKiB6LCBuZGMueSAqIHosIHopOwp9Cgp2ZWMzIGNoaW1lcmFfZGVwdGhfbm9ybWFsKGl2ZWMyIGRpc3BsYXlfY29vcmQpIHsKICBpdmVjMiBsbyA9IHNyY19vZmZzZXQ7CiAgaXZlYzIgaGkgPSBzcmNfb2Zmc2V0ICsgaXZlYzIoc3JjX2V4dGVudCkgLSBpdmVjMigxKTsKICBkaXNwbGF5X2Nvb3JkID0gY2xhbXAoZGlzcGxheV9jb29yZCwgbG8sIGhpKTsKCiAgaXZlYzIgY0wgPSBtYXgoZGlzcGxheV9jb29yZCAtIGl2ZWMyKDEsIDApLCBsbyk7CiAgaXZlYzIgY1IgPSBtaW4oZGlzcGxheV9jb29yZCArIGl2ZWMyKDEsIDApLCBoaSk7CiAgaXZlYzIgY1UgPSBtYXgoZGlzcGxheV9jb29yZCAtIGl2ZWMyKDAsIDEpLCBsbyk7CiAgaXZlYzIgY0QgPSBtaW4oZGlzcGxheV9jb29yZCArIGl2ZWMyKDAsIDEpLCBoaSk7CgogIGZsb2F0IGRDID0gY2hpbWVyYV9kZXB0aF9yYXcoZGlzcGxheV9jb29yZCk7CiAgZmxvYXQgZEwgPSBjaGltZXJhX2RlcHRoX3JhdyhjTCk7CiAgZmxvYXQgZFIgPSBjaGltZXJhX2RlcHRoX3JhdyhjUik7CiAgZmxvYXQgZFUgPSBjaGltZXJhX2RlcHRoX3JhdyhjVSk7CiAgZmxvYXQgZEQgPSBjaGltZXJhX2RlcHRoX3JhdyhjRCk7CgogIGlmIChkQyA8PSAxLjBlLTUpCiAgICByZXR1cm4gdmVjMygwLjApOwoKICB2ZWMzIHBDID0gY2hpbWVyYV92aWV3X3BvcyhkaXNwbGF5X2Nvb3JkLCBkQyk7CiAgdmVjMyBwTCA9IGNoaW1lcmFfdmlld19wb3MoY0wsIG1heChkTCwgMS4wZS01KSk7CiAgdmVjMyBwUiA9IGNoaW1lcmFfdmlld19wb3MoY1IsIG1heChkUiwgMS4wZS01KSk7CiAgdmVjMyBwVSA9IGNoaW1lcmFfdmlld19wb3MoY1UsIG1heChkVSwgMS4wZS01KSk7CiAgdmVjMyBwRCA9IGNoaW1lcmFfdmlld19wb3MoY0QsIG1heChkRCwgMS4wZS01KSk7CgogIC8vIFByZWZlciBzYW1lLXN1cmZhY2UgbmVpZ2hib3JzIGF0IGRpc2NvbnRpbnVpdGllcy4KICB2ZWMzIGR4ID0gYWJzKGRSIC0gZEMpIDw9IGFicyhkQyAtIGRMKSA/IChwUiAtIHBDKSA6IChwQyAtIHBMKTsKICB2ZWMzIGR5ID0gYWJzKGREIC0gZEMpIDw9IGFicyhkQyAtIGRVKSA/IChwRCAtIHBDKSA6IChwQyAtIHBVKTsKCiAgZmxvYXQgbHggPSBkb3QoZHgsIGR4KTsKICBmbG9hdCBseSA9IGRvdChkeSwgZHkpOwogIGlmIChseCA8IDEuMGUtMTIgfHwgbHkgPCAxLjBlLTEyKQogICAgcmV0dXJuIHZlYzMoMC4wLCAwLjAsIDEuMCk7CgogIHZlYzMgbiA9IG5vcm1hbGl6ZShjcm9zcyhkeCwgZHkpKTsKICBpZiAobi56IDwgMC4wKQogICAgbiA9IC1uOwogIHJldHVybiBuOwp9CicnJwppZiBhbmNob3Igbm90IGluIHM6CiAgICByYWlzZSBTeXN0ZW1FeGl0KCdwcmVzZW50X2NvbW1vbiBwdXNoLWNvbnN0YW50IGFuY2hvciBtaXNzaW5nJykKcyA9IHMucmVwbGFjZShhbmNob3IsIGhlbHBlcnMsIDEpCnAud3JpdGVfdGV4dChzLCBlbmNvZGluZz0ndXRmLTgnKQoKcCA9IFBhdGgoJ3NyYy9keHZrL3NoYWRlcnMvZHh2a19wcmVzZW50X2ZyYWcuZnJhZycpCnMgPSBwLnJlYWRfdGV4dChlbmNvZGluZz0ndXRmLTgnKQpvbGQgPSByJycnICBpZiAoY19jaGltZXJhX2RlcHRoKSB7CiAgICAvLyBWNSBwcm92ZWQgdGhpcyBpcyBhIHJlYWwgc2NlbmUtZGVwdGggdGV4dHVyZS4gU2FtcGxlIHRoZSBkZXB0aCBhc3BlY3QgYXMgUiwKICAgIC8vIHVuZG8gdGhlIHZlcnRpY2FsIG9yaWVudGF0aW9uIG1pc21hdGNoLCB0aGVuIGV4cGFuZCBsb3cgcmV2ZXJzZWQtWiB2YWx1ZXMKICAgIC8vIGZvciB2aXNpYmlsaXR5LiBUaGlzIGlzIGEgZGlhZ25vc3RpYyBkaXNwbGF5IHRyYW5zZm9ybSwgbm90IGxpbmVhcml6ZWQgWi4KICAgIGludCBsb2NhbF95ID0gY29vcmQueSAtIHNyY19vZmZzZXQueTsKICAgIGNvb3JkLnkgPSBzcmNfb2Zmc2V0LnkgKyBpbnQoc3JjX2V4dGVudC55KSAtIDEgLSBsb2NhbF95OwogICAgY29vcmQgPSBjbGFtcChjb29yZCwgc3JjX29mZnNldCwgc3JjX29mZnNldCArIGl2ZWMyKHNyY19leHRlbnQpIC0gaXZlYzIoMSkpOwoKICAgIGZsb2F0IGRlcHRoX3JhdyA9IGNsYW1wKHRleGVsRmV0Y2goc19pbWFnZSwgY29vcmQsIDApLnIsIDAuMCwgMS4wKTsKICAgIGZsb2F0IGRlcHRoX3ZpcyA9IHBvdyhkZXB0aF9yYXcsIDAuMjUpOwogICAgb19jb2xvciA9IHZlYzQoZGVwdGhfdmlzLCBkZXB0aF92aXMsIGRlcHRoX3ZpcywgMS4wKTsKICAgIHJldHVybjsKICB9CicnJwpuZXcgPSByJycnICBpZiAoY19jaGltZXJhX2RlcHRoKSB7CiAgICB2ZWMzIG5vcm1hbF92cyA9IGNoaW1lcmFfZGVwdGhfbm9ybWFsKGNvb3JkKTsKICAgIG9fY29sb3IgPSB2ZWM0KG5vcm1hbF92cyAqIDAuNSArIDAuNSwgMS4wKTsKICAgIHJldHVybjsKICB9CicnJwppZiBvbGQgbm90IGluIHM6CiAgICByYWlzZSBTeXN0ZW1FeGl0KCdWNiBub24tc2NhbGluZyBkZXB0aCBicmFuY2ggbWlzc2luZycpCnMgPSBzLnJlcGxhY2Uob2xkLCBuZXcsIDEpCnAud3JpdGVfdGV4dChzLCBlbmNvZGluZz0ndXRmLTgnKQoKcCA9IFBhdGgoJ3NyYy9keHZrL3NoYWRlcnMvZHh2a19wcmVzZW50X2ZyYWdfYmxpdC5mcmFnJykKcyA9IHAucmVhZF90ZXh0KGVuY29kaW5nPSd1dGYtOCcpCm9sZCA9IHInJycgIGlmIChjX2NoaW1lcmFfZGVwdGgpIHsKICAgIC8vIFRoZSBub3JtYWwgc3dhcGNoYWluIGJsaXQgaXMgdmVydGljYWxseSBvcmllbnRlZCBmb3IgY29sb3VyIHByZXNlbnRhdGlvbjsKICAgIC8vIHRoZSBjYXB0dXJlZCBEM0QxMSBkZXB0aCB2aWV3IGlzIG9wcG9zaXRlIGluIFY1LCBzbyBmbGlwIFkgZGVsaWJlcmF0ZWx5LgogICAgdmVjMiBkZXB0aF91diA9IHZlYzIoaV9jb29yZC54LCAxLjAgLSBpX2Nvb3JkLnkpOwogICAgdmVjMiBkZXB0aF9jb29yZF9mID0gdmVjMihzcmNfb2Zmc2V0KSArIHZlYzIoc3JjX2V4dGVudCkgKiBkZXB0aF91djsKICAgIGl2ZWMyIGRlcHRoX2Nvb3JkID0gaXZlYzIoZmxvb3IoZGVwdGhfY29vcmRfZikpOwogICAgZGVwdGhfY29vcmQgPSBjbGFtcChkZXB0aF9jb29yZCwgc3JjX29mZnNldCwgc3JjX29mZnNldCArIGl2ZWMyKHNyY19leHRlbnQpIC0gaXZlYzIoMSkpOwoKICAgIGZsb2F0IGRlcHRoX3JhdyA9IGNsYW1wKHRleGVsRmV0Y2goc19pbWFnZSwgZGVwdGhfY29vcmQsIDApLnIsIDAuMCwgMS4wKTsKICAgIGZsb2F0IGRlcHRoX3ZpcyA9IHBvdyhkZXB0aF9yYXcsIDAuMjUpOwogICAgb19jb2xvciA9IHZlYzQoZGVwdGhfdmlzLCBkZXB0aF92aXMsIGRlcHRoX3ZpcywgMS4wKTsKICAgIHJldHVybjsKICB9CicnJwpuZXcgPSByJycnICBpZiAoY19jaGltZXJhX2RlcHRoKSB7CiAgICBpdmVjMiBkaXNwbGF5X2Nvb3JkID0gaXZlYzIoZmxvb3IodmVjMihzcmNfb2Zmc2V0KSArIHZlYzIoc3JjX2V4dGVudCkgKiBpX2Nvb3JkKSk7CiAgICBkaXNwbGF5X2Nvb3JkID0gY2xhbXAoZGlzcGxheV9jb29yZCwgc3JjX29mZnNldCwgc3JjX29mZnNldCArIGl2ZWMyKHNyY19leHRlbnQpIC0gaXZlYzIoMSkpOwogICAgdmVjMyBub3JtYWxfdnMgPSBjaGltZXJhX2RlcHRoX25vcm1hbChkaXNwbGF5X2Nvb3JkKTsKICAgIG9fY29sb3IgPSB2ZWM0KG5vcm1hbF92cyAqIDAuNSArIDAuNSwgMS4wKTsKICAgIHJldHVybjsKICB9CicnJwppZiBvbGQgbm90IGluIHM6CiAgICByYWlzZSBTeXN0ZW1FeGl0KCdWNiBzY2FsaW5nIGRlcHRoIGJyYW5jaCBtaXNzaW5nJykKcyA9IHMucmVwbGFjZShvbGQsIG5ldywgMSkKcC53cml0ZV90ZXh0KHMsIGVuY29kaW5nPSd1dGYtOCcpCgpwcmludCgnQ0hJTUVSQV9OT1JNQUxTX1Y3IHBhdGNoOiBQQVNTJykK' | base64 -d > /tmp/chimera_v7_patch.py
+          python3 /tmp/chimera_v7_patch.py
+          grep -n 'CHIMERA_NORMALS_V7' src/dxvk/shaders/dxvk_present_common.glsl
+          grep -n 'chimera_depth_normal' src/dxvk/shaders/dxvk_present_frag.frag
+          grep -n 'chimera_depth_normal' src/dxvk/shaders/dxvk_present_frag_blit.frag
+
+      - name: Build DXVK x64 and x32
+        working-directory: dxvk
+        run: |
+          export VERSION_NAME="chimera-dxvk-normals-v7"
+          ./package-release.sh "$VERSION_NAME" build --no-package
+
+      - name: Verify and package runtime
+        working-directory: dxvk
+        run: |
+          set -euxo pipefail
+          root="build/dxvk-chimera-dxvk-normals-v7"
+          test -f "$root/x64/d3d11.dll"
+          test -f "$root/x64/dxgi.dll"
+          test -f "$root/x32/d3d11.dll"
+          test -f "$root/x32/dxgi.dll"
+          python3 - <<'PYIN'
+          from pathlib import Path
+          p = Path('build/dxvk-chimera-dxvk-normals-v7/x64/d3d11.dll')
+          data = p.read_bytes()
+          for marker in (b'CHIMERA_DXVK_PROBE_V1', b'CHIMERA_DSV_CREATE_V1'):
+              if marker not in data:
+                  raise SystemExit(f'Missing inherited marker: {marker!r}')
+          print('V7 inherited runtime marker verification: PASS')
+          PYIN
+          mkdir -p ../runtime_bundle
+          cp "$root/x64/d3d11.dll" ../runtime_bundle/d3d11_64.dll
+          cp "$root/x64/dxgi.dll"  ../runtime_bundle/dxgi_64.dll
+          cp "$root/x32/d3d11.dll" ../runtime_bundle/d3d11_32.dll
+          cp "$root/x32/dxgi.dll"  ../runtime_bundle/dxgi_32.dll
+          cp LICENSE ../runtime_bundle/DXVK-LICENSE
+          sha256sum ../runtime_bundle/*.dll
+
+      - name: Upload DXVK runtime
+        uses: actions/upload-artifact@v7
+        with:
+          name: chimera-dxvk-normals-v7-runtime
+          path: runtime_bundle
+          compression-level: 0
+          if-no-files-found: error
