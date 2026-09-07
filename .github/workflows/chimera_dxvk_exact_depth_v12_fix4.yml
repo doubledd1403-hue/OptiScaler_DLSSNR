@@ -1,0 +1,307 @@
+name: Chimera DXVK V12 Exact Depth Foundation FIX4
+
+on:
+  push:
+    branches:
+      - chimera-amd-nr
+    paths:
+      - '.github/workflows/chimera_dxvk_exact_depth_v12_fix4.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-dxvk:
+    name: Build Chimera V12 exact depth + bar diagnostics FIX4
+    runs-on: ubuntu-latest
+    container: archlinux/archlinux:base-devel
+
+    steps:
+      - name: Install build dependencies
+        run: pacman -Syu --needed --noconfirm git meson mingw-w64-gcc glslang python python-yaml
+
+      - name: Clone Chimera source and pinned DXVK
+        run: |
+          git clone --branch chimera-amd-nr --single-branch https://github.com/doubledd1403-hue/OptiScaler_DLSSNR.git chimera-source
+          git clone https://github.com/doitsujin/dxvk.git dxvk
+          cd dxvk
+          git checkout d7ac2580aa274a14a500e74edbe4ec6aae250e4a
+          git submodule update --init --recursive
+
+      - name: Reuse proven V1 through V11.2 renderer chain
+        run: |
+          python3 - <<'PYIN'
+          import yaml
+          from pathlib import Path
+
+          wf = yaml.safe_load(Path('chimera-source/.github/workflows/chimera_dxvk_composite_visibility_v11_2_fix.yml').read_text())
+          job = next(iter(wf['jobs'].values()))
+
+          inherit = next(s for s in job['steps'] if s.get('name') == 'Prepare and apply inherited V1 through V11.1 patches')
+          v112 = next(s for s in job['steps'] if s.get('name') == 'Add V11.2 visible composite')
+
+          Path('/tmp/chimera_inherit_v11_1.sh').write_text(inherit['run'])
+          Path('/tmp/chimera_v11_2.sh').write_text(v112['run'])
+          PYIN
+
+          bash /tmp/chimera_inherit_v11_1.sh
+          (
+            cd dxvk
+            bash /tmp/chimera_v11_2.sh
+          )
+
+      - name: Prepare corrected V12 patch
+        run: |
+          python3 - <<'PYIN'
+          from pathlib import Path
+          import base64
+          import re
+          import yaml
+
+          wf = yaml.safe_load(Path('chimera-source/.github/workflows/chimera_dxvk_exact_depth_v12.yml').read_text())
+          job = next(iter(wf['jobs'].values()))
+          step = next(s for s in job['steps'] if s.get('name') == 'Add V12 exact depth reconstruction and diagnostics')
+
+          m = re.search(
+              r"echo '([^']+)' \| base64 -d > /tmp/chimera_v12_patch\.py",
+              step['run'])
+          if not m:
+              raise SystemExit('V12 FIX: could not extract original V12 patch')
+
+          patch = base64.b64decode(m.group(1)).decode('utf-8')
+
+          # Fix 1: the original patch required an exact indentation match around
+          # V8's "size_t limit" block. Replace that fragile block with a
+          # whitespace-independent locator.
+          start = patch.find("live_anchor = '''")
+          end = patch.find("p.write_text(s, encoding='utf-8')", start)
+          if start < 0 or end < 0:
+              raise SystemExit('V12 FIX: original live-writer patch block not found')
+          end = patch.find('\n', end)
+          if end < 0:
+              end = len(patch)
+          else:
+              end += 1
+
+          robust = r'''live_needle = 'size_t limit = std::min<size_t>(candidates.size(), 10u);'
+          live_idx = s.find(live_needle)
+          if live_idx < 0:
+              raise SystemExit('V12: projection live-writer limit anchor missing')
+
+          live_line_start = s.rfind('\n', 0, live_idx) + 1
+          live_indent = s[live_line_start:live_idx]
+          live_for = 'for (size_t i = 0; i < limit; i++) {'
+          live_for_idx = s.find(live_for, live_idx + len(live_needle))
+          if live_for_idx < 0:
+              raise SystemExit('V12: projection live-writer loop anchor missing')
+
+          between = s[live_idx + len(live_needle):live_for_idx]
+          if between.strip():
+              raise SystemExit('V12: unexpected text between projection limit and loop')
+
+          live_anchor_start = live_line_start
+          live_anchor_end = live_for_idx + len(live_for)
+
+          lines = [
+              '// V12: publish the most stable high-quality projection candidate.',
+              '// Ranking adds persistence (hits) to V8 matrix plausibility score.',
+              'const ChimeraProjectionCandidate* liveCandidate = nullptr;',
+              'float liveRank = -1.0e9f;',
+              'for (const auto& c : candidates) {',
+              '  if (c.hits < 3)',
+              '    continue;',
+              '  if (std::abs(c.aspect - (16.0f / 9.0f)) > 0.20f)',
+              '    continue;',
+              '',
+              '  float rank = c.score + std::min<float>(float(c.hits), 100.0f) * 0.15f;',
+              '  if (rank > liveRank) {',
+              '    liveRank = rank;',
+              '    liveCandidate = &c;',
+              '  }',
+              '}',
+              '',
+              'if (!liveCandidate && !candidates.empty())',
+              '  liveCandidate = &candidates.front();',
+              '',
+              'if (liveCandidate) {',
+              '  const auto& c = *liveCandidate;',
+              '  auto livePath = chimeraProjectionPath().parent_path() / L"chimera_projection_live.cfg";',
+              '  std::ofstream live(livePath, std::ios::trunc);',
+              '  if (live) {',
+              '    live << std::fixed << std::setprecision(9);',
+              '    live << "marker=" << g_chimeraDepthFoundationV12Marker << "\\n";',
+              '    live << "valid=1\\n";',
+              '    live << "score=" << c.score << "\\n";',
+              '    live << "hits=" << c.hits << "\\n";',
+              '    live << "slot=" << c.slot << "\\n";',
+              '    live << "float_offset=" << c.floatOffset << "\\n";',
+              '    live << "layout=" << (c.layout ? 1 : 0) << "\\n";',
+              '    live << "m00=" << c.m00 << "\\n";',
+              '    live << "m11=" << c.m11 << "\\n";',
+              '    live << "m22=" << c.m22 << "\\n";',
+              '    live << "m23=" << c.p23 << "\\n";',
+              '    live << "m32=" << c.p32 << "\\n";',
+              '    live << "m33=" << c.m33 << "\\n";',
+              '    live << "fovy=" << c.fovY << "\\n";',
+              '    live << "aspect=" << c.aspect << "\\n";',
+              '  }',
+              '}',
+              '',
+              live_needle,
+              live_for,
+          ]
+
+          live_insert = '\n'.join(live_indent + line if line else '' for line in lines)
+          s = s[:live_anchor_start] + live_insert + s[live_anchor_end:]
+          p.write_text(s, encoding='utf-8')
+          '''
+
+          patch = patch[:start] + robust + patch[end:]
+
+          # Fix 2: preserve the projection matrix's real view-space depth scale.
+          # The original draft divided the solved Z by the near/homogeneous
+          # coefficient ratio, which collapses infinite reversed-Z back toward
+          # the old 1/depth proxy.
+          old = r'''  float numerator;
+            float denominator;
+            float depth_scale;
+
+            if (column_vector) {
+              numerator = m23 - depth_raw * m33;
+              denominator = depth_raw * m32 - m22;
+              depth_scale = abs(m23) / max(abs(m32), 1.0e-6);
+            } else {
+              numerator = m32 - depth_raw * m33;
+              denominator = depth_raw * m23 - m22;
+              depth_scale = abs(m32) / max(abs(m23), 1.0e-6);
+            }
+
+            if (abs(denominator) < 1.0e-8 || depth_scale < 1.0e-7)
+              return fallback;
+
+            float z = abs(numerator / denominator) / depth_scale;
+          '''
+
+          new = r'''  float numerator;
+            float denominator;
+
+            if (column_vector) {
+              // d = (m22*z + m23) / (m32*z + m33)
+              numerator = m23 - depth_raw * m33;
+              denominator = depth_raw * m32 - m22;
+            } else {
+              // Row-vector form: d = (m22*z + m32) / (m23*z + m33)
+              numerator = m32 - depth_raw * m33;
+              denominator = depth_raw * m23 - m22;
+            }
+
+            if (abs(denominator) < 1.0e-8)
+              return fallback;
+
+            // Keep the actual view-space scale from the captured projection.
+            float z = abs(numerator / denominator);
+          '''
+
+          if old not in patch:
+              raise SystemExit('V12 FIX: exact-depth formula block not found')
+          patch = patch.replace(old, new, 1)
+
+          # Fix 3: V10 does not have a standalone path helper. It constructs
+          # the game-directory path inline inside chimeraLightingSettings().
+          pd_start = patch.find("cfg_token = 'chimera_lighting.cfg'")
+          pd_end = patch.find("runtime_anchor = '  struct ChimeraLightingRuntimeSettings {'", pd_start)
+          if pd_start < 0 or pd_end < 0:
+              raise SystemExit('V12 FIX4: V10 path-discovery section not found')
+
+          path_check = (
+              "cfg_token = 'chimera_lighting.cfg'\n"
+              "if cfg_token not in s:\n"
+              "    raise SystemExit('V12: V10 lighting cfg token missing')\n\n"
+          )
+          patch = patch[:pd_start] + path_check + patch[pd_end:]
+
+          # Replace only the three statements in the V12 runtime path function.
+          # Matching starts at 'auto', so surrounding source indentation cannot
+          # break the patch.
+          body_old = (
+              "auto path = {lighting_path_fn}();\n"
+              "    path.replace_filename(\"chimera_projection_live.cfg\");\n"
+              "    return path;"
+          )
+          body_new = (
+              "#ifdef _WIN32\n"
+              "    char modulePath[MAX_PATH] = {{ }};\n"
+              "    DWORD len = GetModuleFileNameA(nullptr, modulePath, MAX_PATH);\n"
+              "    if (!len || len >= MAX_PATH)\n"
+              "      return std::filesystem::path(\"chimera_projection_live.cfg\");\n\n"
+              "    std::filesystem::path path(std::string(modulePath, len));\n"
+              "    return path.parent_path() / \"chimera_projection_live.cfg\";\n"
+              "  #else\n"
+              "    return std::filesystem::path(\"chimera_projection_live.cfg\");\n"
+              "  #endif"
+          )
+
+          if body_old not in patch:
+              raise SystemExit('V12 FIX4: runtime projection path body not found')
+          patch = patch.replace(body_old, body_new, 1)
+
+          compile(patch, '/tmp/chimera_v12_patch_fixed.py', 'exec')
+          Path('/tmp/chimera_v12_patch_fixed.py').write_text(patch, encoding='utf-8')
+          print('V12 FIX patch preparation: PASS')
+          PYIN
+
+      - name: Add V12 exact depth reconstruction and diagnostics FIX4
+        working-directory: dxvk
+        run: |
+          python3 /tmp/chimera_v12_patch_fixed.py
+          grep -n 'CHIMERA_DEPTH_FOUNDATION_V12' src/d3d11/d3d11_context.cpp
+          grep -n 'chimeraReadProjectionRuntimeV12' src/dxvk/dxvk_swapchain_blitter.cpp
+          grep -n 'chimera_depth_to_view_z_v12' src/dxvk/shaders/dxvk_present_common.glsl
+
+      - name: Build DXVK x64 and x32
+        working-directory: dxvk
+        run: |
+          export VERSION_NAME="chimera-dxvk-exact-depth-v12-fix4"
+          ./package-release.sh "$VERSION_NAME" build --no-package
+
+      - name: Verify and package runtime
+        working-directory: dxvk
+        run: |
+          set -euxo pipefail
+          root="build/dxvk-chimera-dxvk-exact-depth-v12-fix4"
+          test -f "$root/x64/d3d11.dll"
+          test -f "$root/x64/dxgi.dll"
+          test -f "$root/x32/d3d11.dll"
+          test -f "$root/x32/dxgi.dll"
+
+          python3 - <<'PYIN'
+          from pathlib import Path
+          p = Path('build/dxvk-chimera-dxvk-exact-depth-v12-fix4/x64/d3d11.dll')
+          data = p.read_bytes()
+          for marker in (
+              b'CHIMERA_DXVK_PROBE_V1',
+              b'CHIMERA_DSV_CREATE_V1',
+              b'CHIMERA_PROJECTION_V8',
+              b'CHIMERA_DEPTH_FOUNDATION_V12',
+          ):
+              if marker not in data:
+                  raise SystemExit(f'Missing retained binary marker: {marker!r}')
+          print('V12 FIX4 retained runtime marker verification: PASS')
+          PYIN
+
+          mkdir -p ../runtime_bundle
+          cp "$root/x64/d3d11.dll" ../runtime_bundle/d3d11_64.dll
+          cp "$root/x64/dxgi.dll"  ../runtime_bundle/dxgi_64.dll
+          cp "$root/x32/d3d11.dll" ../runtime_bundle/d3d11_32.dll
+          cp "$root/x32/dxgi.dll"  ../runtime_bundle/dxgi_32.dll
+          cp LICENSE ../runtime_bundle/DXVK-LICENSE
+          sha256sum ../runtime_bundle/*.dll
+
+      - name: Upload DXVK runtime
+        uses: actions/upload-artifact@v7
+        with:
+          name: chimera-dxvk-exact-depth-v12-fix4-runtime
+          path: runtime_bundle
+          compression-level: 0
+          if-no-files-found: error
