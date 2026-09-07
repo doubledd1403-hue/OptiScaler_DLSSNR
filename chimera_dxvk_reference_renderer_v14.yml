@@ -1,0 +1,107 @@
+name: Chimera DXVK V14 Reference Renderer
+
+on:
+  push:
+    branches:
+      - chimera-amd-nr
+    paths:
+      - '.github/workflows/chimera_dxvk_reference_renderer_v14.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-dxvk:
+    name: Build Chimera V14 reference renderer
+    runs-on: ubuntu-latest
+    container: archlinux/archlinux:base-devel
+
+    steps:
+      - name: Install build dependencies
+        run: pacman -Syu --needed --noconfirm git meson mingw-w64-gcc glslang python python-yaml
+
+      - name: Clone Chimera source and pinned DXVK
+        run: |
+          git clone --branch chimera-amd-nr --single-branch https://github.com/doubledd1403-hue/OptiScaler_DLSSNR.git chimera-source
+          git clone https://github.com/doitsujin/dxvk.git dxvk
+          cd dxvk
+          git checkout d7ac2580aa274a14a500e74edbe4ec6aae250e4a
+          git submodule update --init --recursive
+
+      - name: Reuse proven V1 through V13.1 chain
+        run: |
+          python3 - <<'PYIN'
+          import yaml
+          from pathlib import Path
+
+          wf = yaml.safe_load(
+              Path('chimera-source/.github/workflows/chimera_dxvk_reconstruction_shadows_v13_1.yml').read_text())
+          job = next(iter(wf['jobs'].values()))
+
+          steps = [
+            ('Reuse proven V1 through V13 chain', '/tmp/v14_inherit_v13.sh'),
+            ('Add V13.1 reconstruction and contact-shadow foundation', '/tmp/v14_inherit_v131.sh'),
+          ]
+
+          for step_name, out_path in steps:
+              step = next(s for s in job['steps'] if s.get('name') == step_name)
+              Path(out_path).write_text(step['run'])
+          PYIN
+
+          bash /tmp/v14_inherit_v13.sh
+          (
+            cd dxvk
+            bash /tmp/v14_inherit_v131.sh
+          )
+
+          grep -q 'CHIMERA_DEPTH_STABILITY_V12_1' dxvk/src/d3d11/d3d11_context.cpp
+          grep -q 'CHIMERA_LIGHTING_V13_1_RECON_SHADOWS' dxvk/src/dxvk/shaders/dxvk_present_common.glsl
+
+      - name: Add V14 high-quality reference renderer
+        working-directory: dxvk
+        run: |
+          echo 'CmZyb20gcGF0aGxpYiBpbXBvcnQgUGF0aAoKIyBWMTQgaXMgZGVsaWJlcmF0ZWx5IGEgUkVGRVJFTkNFIHJlbmRlcmVyLCBub3QgdGhlIGZpbmFsIEFsbHkgYnVkZ2V0LgojIEdvYWw6IGVzdGFibGlzaCB0aGUgYmVzdCB2aXN1YWwgdGFyZ2V0IGZpcnN0LCB0aGVuIGRpc3RpbGwgaXQgZG93biBsYXRlci4KCnAgPSBQYXRoKCJzcmMvZHh2ay9keHZrX3N3YXBjaGFpbl9ibGl0dGVyLmNwcCIpCnMgPSBwLnJlYWRfdGV4dChlbmNvZGluZz0idXRmLTgiKQpvbGQgPSAic2V0dGluZ3MucmF5cyA9IHYgPT0gMHUgPyAwdSA6ICh2ID49IDE2dSA/IDE2dSA6ICh2ID49IDh1ID8gOHUgOiA0dSkpOyIKbmV3ID0gInNldHRpbmdzLnJheXMgPSB2ID09IDB1ID8gMHUgOiAodiA+PSAzMnUgPyAzMnUgOiAodiA+PSAxNnUgPyAxNnUgOiAodiA+PSA4dSA/IDh1IDogNHUpKSk7IgppZiBvbGQgbm90IGluIHM6CiAgICByYWlzZSBTeXN0ZW1FeGl0KCJWMTQ6IFYxMS4xIHJheXMgcGFyc2VyIGFuY2hvciBtaXNzaW5nIikKcyA9IHMucmVwbGFjZShvbGQsIG5ldywgMSkKcC53cml0ZV90ZXh0KHMsIGVuY29kaW5nPSJ1dGYtOCIpCgpwID0gUGF0aCgic3JjL2R4dmsvc2hhZGVycy9keHZrX3ByZXNlbnRfY29tbW9uLmdsc2wiKQpzID0gcC5yZWFkX3RleHQoZW5jb2Rpbmc9InV0Zi04IikKcmVxdWlyZWQgPSBbCiAgICAiQ0hJTUVSQV9MSUdIVElOR19WMTNfMV9SRUNPTl9TSEFET1dTIiwKICAgICJjaGltZXJhX2NvbnRhY3Rfc2hhZG93X3YxMzEiLAogICAgImNoaW1lcmFfZmlsdGVyZWRfaGl0X2NvbG91cl92MTMiLAogICAgImNoaW1lcmFfdHJhY2VfcmFkaWFuY2VfdjExIiwKICAgICJjaGltZXJhX2RlcHRoX3RvX3ZpZXdfel92MTIiLAogICAgImZsb2F0IHJheV9hbyIsCiAgICAiZmxvYXQgY29udGFjdF9hbyIsCl0KZm9yIHRva2VuIGluIHJlcXVpcmVkOgogICAgaWYgdG9rZW4gbm90IGluIHM6CiAgICAgICAgcmFpc2UgU3lzdGVtRXhpdChmIlYxNDogaW5oZXJpdGVkIHRva2VuIG1pc3Npbmc6IHt0b2tlbn0iKQoKbWFya2VyID0gIi8vIENISU1FUkFfTElHSFRJTkdfVjE0X1JFRkVSRU5DRV9SRU5ERVJFUiIKaWYgbWFya2VyIGluIHM6CiAgICByYWlzZSBTeXN0ZW1FeGl0KCJWMTQ6IG1hcmtlciBhbHJlYWR5IHByZXNlbnQiKQoKb2xkID0gJycnICB1aW50IHJlcXVlc3RlZCA9IGNoaW1lcmFfcmF5cyA+PSAxNnUKICAgID8gMTZ1CiAgICA6IChjaGltZXJhX3JheXMgPj0gOHUgPyA4dSA6IDR1KTsnJycKbmV3ID0gJycnICB1aW50IHJlcXVlc3RlZCA9IGNoaW1lcmFfcmF5cyA+PSAzMnUKICAgID8gMzJ1CiAgICA6IChjaGltZXJhX3JheXMgPj0gMTZ1ID8gMTZ1IDogKGNoaW1lcmFfcmF5cyA+PSA4dSA/IDh1IDogNHUpKTsnJycKaWYgb2xkIG5vdCBpbiBzOgogICAgcmFpc2UgU3lzdGVtRXhpdCgiVjE0OiByZXF1ZXN0ZWQtcmF5IGJsb2NrIG1pc3NpbmciKQpzID0gcy5yZXBsYWNlKG9sZCwgbmV3LCAxKQoKb2xkID0gIiAgZm9yICh1aW50IGkgPSAwdTsgaSA8IDE2dTsgaSsrKSB7IgpuZXcgPSAiICBmb3IgKHVpbnQgaSA9IDB1OyBpIDwgMzJ1OyBpKyspIHsiCmlmIG9sZCBub3QgaW4gczoKICAgIHJhaXNlIFN5c3RlbUV4aXQoIlYxNDogbWFpbiByYXkgbG9vcCBhbmNob3IgbWlzc2luZyIpCnMgPSBzLnJlcGxhY2Uob2xkLCBuZXcsIDEpCgpvbGQgPSAiICBmbG9hdCBtYXhfZGlzdGFuY2UgPSBtYXgob3JpZ2luLnogKiAwLjEwNSwgMC4wNTUpOyIKbmV3ID0gIiAgZmxvYXQgbWF4X2Rpc3RhbmNlID0gbWF4KG9yaWdpbi56ICogMC4xODUsIDAuMDg1KTsiCmlmIG9sZCBub3QgaW4gczoKICAgIHJhaXNlIFN5c3RlbUV4aXQoIlYxNDogcmF5IG1heC1kaXN0YW5jZSBhbmNob3IgbWlzc2luZyIpCnMgPSBzLnJlcGxhY2Uob2xkLCBuZXcsIDEpCgpvbGQgPSAiICBmb3IgKGludCBpID0gMDsgaSA8IDE2OyBpKyspIHsiCm5ldyA9ICIgIGZvciAoaW50IGkgPSAwOyBpIDwgMjQ7IGkrKykgeyIKaWYgb2xkIG5vdCBpbiBzOgogICAgcmFpc2UgU3lzdGVtRXhpdCgiVjE0OiByYXktbWFyY2ggc3RlcC1sb29wIGFuY2hvciBtaXNzaW5nIikKcyA9IHMucmVwbGFjZShvbGQsIG5ldywgMSkKCm9sZCA9ICIgICAgZmxvYXQgdGFuZ2VudF9tYWcgPSBtaXgoMC41MiwgMC44NiwgdSk7IgpuZXcgPSAiICAgIGZsb2F0IHRhbmdlbnRfbWFnID0gbWl4KDAuMzgsIDAuOTMsIHUpOyIKaWYgb2xkIG5vdCBpbiBzOgogICAgcmFpc2UgU3lzdGVtRXhpdCgiVjE0OiBoZW1pc3BoZXJlIGRpc3RyaWJ1dGlvbiBhbmNob3IgbWlzc2luZyIpCnMgPSBzLnJlcGxhY2Uob2xkLCBuZXcsIDEpCgpzdGFydCA9IHMuZmluZCgiZmxvYXQgY2hpbWVyYV9jb250YWN0X3NoYWRvd192MTMxKGl2ZWMyIGRpc3BsYXlfY29vcmQpIHsiKQplbmQgPSBzLmZpbmQoIlxuXG52ZWM0IGNoaW1lcmFfYXBwbHlfbGlnaHRpbmdfdjExIiwgc3RhcnQpCmlmIHN0YXJ0IDwgMCBvciBlbmQgPCAwOgogICAgcmFpc2UgU3lzdGVtRXhpdCgiVjE0OiBWMTMuMSBjb250YWN0LXNoYWRvdyBmdW5jdGlvbiBib3VuZGFyaWVzIG1pc3NpbmciKQoKc2hhZG93ID0gcicnJ2Zsb2F0IGNoaW1lcmFfY29udGFjdF9zaGFkb3dfdjEzMShpdmVjMiBkaXNwbGF5X2Nvb3JkKSB7CiAgaXZlYzIgZXh0ZW50ID0gbWF4KGNoaW1lcmFfZGVwdGhfZXh0ZW50LCBpdmVjMigxKSk7CiAgaXZlYzIgcDAgPSBjbGFtcChkaXNwbGF5X2Nvb3JkLCBpdmVjMigwKSwgZXh0ZW50IC0gaXZlYzIoMSkpOwoKICBmbG9hdCBkMCA9IGNoaW1lcmFfZGVwdGhfcmF3KHAwKTsKICBpZiAoZDAgPD0gMS4wZS01KQogICAgcmV0dXJuIDAuMDsKCiAgZmxvYXQgejAgPSBjaGltZXJhX2RlcHRoX3RvX3ZpZXdfel92MTIoZDApOwogIHZlYzMgbjAgPSBub3JtYWxpemUoY2hpbWVyYV9kZXB0aF9ub3JtYWwocDApKTsKCiAgY29uc3QgaXZlYzIgZGlyc1s4XSA9IGl2ZWMyWzhdKAogICAgaXZlYzIoIDEsIDApLCBpdmVjMigtMSwgMCksIGl2ZWMyKDAsICAxKSwgaXZlYzIoMCwgLTEpLAogICAgaXZlYzIoIDEsIDEpLCBpdmVjMigtMSwgMSksIGl2ZWMyKDEsIC0xKSwgaXZlYzIoLTEsLTEpKTsKCiAgZmxvYXQgb2NjID0gMC4wOwogIGZsb2F0IHdzdW0gPSAwLjA7CgogIGZvciAoaW50IHJpbmcgPSAwOyByaW5nIDwgNDsgcmluZysrKSB7CiAgICBpbnQgcmFkaXVzID0gcmluZyA9PSAwID8gMiA6IChyaW5nID09IDEgPyA1IDogKHJpbmcgPT0gMiA/IDEwIDogMTgpKTsKICAgIGZsb2F0IHJpbmdfdyA9IHJpbmcgPT0gMCA/IDEuMDAgOiAocmluZyA9PSAxID8gMC43NiA6IChyaW5nID09IDIgPyAwLjQ4IDogMC4yNSkpOwoKICAgIGZvciAoaW50IGkgPSAwOyBpIDwgODsgaSsrKSB7CiAgICAgIGl2ZWMyIHEgPSBjbGFtcChwMCArIGRpcnNbaV0gKiByYWRpdXMsIGl2ZWMyKDApLCBleHRlbnQgLSBpdmVjMigxKSk7CiAgICAgIGZsb2F0IGRxID0gY2hpbWVyYV9kZXB0aF9yYXcocSk7CiAgICAgIGlmIChkcSA8PSAxLjBlLTUpCiAgICAgICAgY29udGludWU7CgogICAgICBmbG9hdCB6cSA9IGNoaW1lcmFfZGVwdGhfdG9fdmlld196X3YxMihkcSk7CiAgICAgIHZlYzMgbnEgPSBub3JtYWxpemUoY2hpbWVyYV9kZXB0aF9ub3JtYWwocSkpOwoKICAgICAgZmxvYXQgcmVsX3ogPSBhYnMoenEgLSB6MCkgLyBtYXgoYWJzKHowKSwgMC4wNSk7CiAgICAgIGZsb2F0IHByb3hpbWl0eSA9IGV4cDIoLXJlbF96ICogMTguMCk7CgogICAgICBmbG9hdCBjcmVhc2UgPSBjbGFtcCgxLjAgLSBkb3QobjAsIG5xKSwgMC4wLCAxLjApOwogICAgICBmbG9hdCBuZWFyZXIgPSBjbGFtcCgoejAgLSB6cSkgLyBtYXgoYWJzKHowKSAqIDAuMDUwLCAwLjAyMCksIDAuMCwgMS4wKTsKICAgICAgZmxvYXQgaG9yaXpvbiA9IG5lYXJlciAqIChyaW5nID49IDIgPyAwLjk1IDogMC41NSk7CgogICAgICBmbG9hdCBzYW1wbGVfb2NjID0gY2xhbXAoY3JlYXNlICogMS41NSArIG5lYXJlciAqIDAuNjIgKyBob3Jpem9uICogMC40OCwgMC4wLCAxLjApOwogICAgICBmbG9hdCB3ID0gcmluZ193ICogbWl4KDAuMzYsIDEuMCwgcHJveGltaXR5KTsKICAgICAgb2NjICs9IHNhbXBsZV9vY2MgKiB3OwogICAgICB3c3VtICs9IHc7CiAgICB9CiAgfQoKICBpZiAod3N1bSA8PSAxLjBlLTUpCiAgICByZXR1cm4gMC4wOwoKICBmbG9hdCB2ID0gb2NjIC8gd3N1bTsKICByZXR1cm4gc21vb3Roc3RlcCgwLjAxOCwgMC4yOSwgdik7Cn0nJycKcyA9IHNbOnN0YXJ0XSArIHNoYWRvdyArIHNbZW5kOl0KCm9sZCA9ICIgIGZsb2F0IGNvbmZpZGVuY2UgPSBzbW9vdGhzdGVwKDAuMCwgMC43NSwgaGl0X2ZyYWN0aW9uKTsiCm5ldyA9ICIgIGZsb2F0IGNvbmZpZGVuY2UgPSBzbW9vdGhzdGVwKDAuMCwgMC40MiwgaGl0X2ZyYWN0aW9uKTsiCmlmIG9sZCBub3QgaW4gczoKICAgIHJhaXNlIFN5c3RlbUV4aXQoIlYxNDogY29uZmlkZW5jZSBhbmNob3IgbWlzc2luZyIpCnMgPSBzLnJlcGxhY2Uob2xkLCBuZXcsIDEpCgpvbGQgPSAnJycgIGZsb2F0IGFvID0gY2xhbXAocmF5X2FvICogMC41OCArIGNvbnRhY3RfYW8gKiAwLjcyLCAwLjAsIDEuMCk7CiAgY29sb3IucmdiICo9IDEuMCAtIHVzZXJfc3RyZW5ndGggKiAwLjEwNSAqIGFvOycnJwpuZXcgPSAnJycgIGZsb2F0IGFvID0gY2xhbXAocmF5X2FvICogMC40OCArIGNvbnRhY3RfYW8gKiAxLjE4LCAwLjAsIDEuMCk7CiAgZmxvYXQgc2hhZG93X2Ftb3VudCA9IGNsYW1wKHVzZXJfc3RyZW5ndGggKiAwLjI4ICogYW8sIDAuMCwgMC4zMik7CiAgY29sb3IucmdiICo9IDEuMCAtIHNoYWRvd19hbW91bnQ7JycnCmlmIG9sZCBub3QgaW4gczoKICAgIHJhaXNlIFN5c3RlbUV4aXQoIlYxNDogVjEzLjEgQU8gY29tcG9zaXRlIGFuY2hvciBtaXNzaW5nIikKcyA9IHMucmVwbGFjZShvbGQsIG5ldywgMSkKCm9sZCA9ICcnJyAgaWYgKGhpdF93ZWlnaHRfc3VtID4gMS4wZS01KSB7CiAgICB2ZWMzIGJvdW5jZSA9IGF2ZXJhZ2VfaGl0ICogKDAuMzggKiBjb25maWRlbmNlICogdXNlcl9zdHJlbmd0aCk7CiAgICBjb2xvci5yZ2IgKz0gYm91bmNlOwogIH0nJycKbmV3ID0gJycnICBpZiAoaGl0X3dlaWdodF9zdW0gPiAxLjBlLTUpIHsKICAgIGZsb2F0IGJvdW5jZV9sdW1hID0gY2hpbWVyYV9sdW1hX3YxMyhhdmVyYWdlX2hpdCk7CiAgICB2ZWMzIGJvdW5jZV9jb2xvdXIgPSBtYXgoCiAgICAgIG1peCh2ZWMzKGJvdW5jZV9sdW1hKSwgYXZlcmFnZV9oaXQsIDEuMTYpLAogICAgICB2ZWMzKDAuMCkpOwoKICAgIHZlYzMgYm91bmNlID0gbWluKAogICAgICBib3VuY2VfY29sb3VyICogKDAuOTIgKiBjb25maWRlbmNlICogdXNlcl9zdHJlbmd0aCksCiAgICAgIHZlYzMoMS4wNSkpOwogICAgY29sb3IucmdiICs9IGJvdW5jZTsKICB9JycnCmlmIG9sZCBub3QgaW4gczoKICAgIHJhaXNlIFN5c3RlbUV4aXQoIlYxNDogVjEzLjEgYm91bmNlIGNvbXBvc2l0ZSBhbmNob3IgbWlzc2luZyIpCnMgPSBzLnJlcGxhY2Uob2xkLCBuZXcsIDEpCgpzID0gcy5yZXBsYWNlKAogICAgIi8vIENISU1FUkFfTElHSFRJTkdfVjEzXzFfUkVDT05fU0hBRE9XUyIsCiAgICAiLy8gQ0hJTUVSQV9MSUdIVElOR19WMTRfUkVGRVJFTkNFX1JFTkRFUkVSXG4vLyBDSElNRVJBX0xJR0hUSU5HX1YxM18xX1JFQ09OX1NIQURPV1MiLAogICAgMSkKCnAud3JpdGVfdGV4dChzLCBlbmNvZGluZz0idXRmLTgiKQoKY2hlY2sgPSBwLnJlYWRfdGV4dChlbmNvZGluZz0idXRmLTgiKQpmb3IgdG9rZW4gaW4gWwogICAgIkNISU1FUkFfTElHSFRJTkdfVjE0X1JFRkVSRU5DRV9SRU5ERVJFUiIsCiAgICAiY2hpbWVyYV9yYXlzID49IDMydSIsCiAgICAiaSA8IDMydSIsCiAgICAicmluZyA8IDQiLAogICAgInNoYWRvd19hbW91bnQiLAogICAgImJvdW5jZV9jb2xvdXIiLApdOgogICAgaWYgdG9rZW4gbm90IGluIGNoZWNrOgogICAgICAgIHJhaXNlIFN5c3RlbUV4aXQoZiJWMTQ6IHZlcmlmaWNhdGlvbiB0b2tlbiBtaXNzaW5nOiB7dG9rZW59IikKCnByaW50KCJDSElNRVJBIFYxNCByZWZlcmVuY2UgcmVuZGVyZXIgcGF0Y2g6IFBBU1MiKQpwcmludCgiICA0LzgvMTYvMzIgcmF5czogWUVTIikKcHJpbnQoIiAgMjQtc3RlcCB3aWRlciBHSSB0cmF2ZXJzYWw6IFlFUyIpCnByaW50KCIgIDQtcmluZyBtdWx0aXNjYWxlIHNoYWRvdy9vY2NsdXNpb24gZmllbGQ6IFlFUyIpCnByaW50KCIgIGhpZ2gtdmlzaWJpbGl0eSBpbmRpcmVjdCBjb2xvdXIgcmVmZXJlbmNlOiBZRVMiKQo=' | base64 -d > /tmp/chimera_v14_patch.py
+          python3 /tmp/chimera_v14_patch.py
+
+          grep -n 'CHIMERA_LIGHTING_V14_REFERENCE_RENDERER' src/dxvk/shaders/dxvk_present_common.glsl
+          grep -n 'chimera_rays >= 32u' src/dxvk/shaders/dxvk_present_common.glsl
+          grep -n 'shadow_amount' src/dxvk/shaders/dxvk_present_common.glsl
+          grep -n 'bounce_colour' src/dxvk/shaders/dxvk_present_common.glsl
+
+      - name: Build DXVK x64 and x32
+        working-directory: dxvk
+        run: |
+          export VERSION_NAME="chimera-dxvk-reference-renderer-v14"
+          ./package-release.sh "$VERSION_NAME" build --no-package
+
+      - name: Verify and package runtime
+        working-directory: dxvk
+        run: |
+          set -euxo pipefail
+          root="build/dxvk-chimera-dxvk-reference-renderer-v14"
+          test -f "$root/x64/d3d11.dll"
+          test -f "$root/x64/dxgi.dll"
+          test -f "$root/x32/d3d11.dll"
+          test -f "$root/x32/dxgi.dll"
+
+          grep -q 'CHIMERA_LIGHTING_V14_REFERENCE_RENDERER' src/dxvk/shaders/dxvk_present_common.glsl
+          grep -q 'chimera_rays >= 32u' src/dxvk/shaders/dxvk_present_common.glsl
+          grep -q 'ring < 4' src/dxvk/shaders/dxvk_present_common.glsl
+          grep -q 'bounce_colour' src/dxvk/shaders/dxvk_present_common.glsl
+
+          mkdir -p ../runtime_bundle
+          cp "$root/x64/d3d11.dll" ../runtime_bundle/d3d11_64.dll
+          cp "$root/x64/dxgi.dll"  ../runtime_bundle/dxgi_64.dll
+          cp "$root/x32/d3d11.dll" ../runtime_bundle/d3d11_32.dll
+          cp "$root/x32/dxgi.dll"  ../runtime_bundle/dxgi_32.dll
+          cp LICENSE ../runtime_bundle/DXVK-LICENSE
+          sha256sum ../runtime_bundle/*.dll
+
+      - name: Upload DXVK runtime
+        uses: actions/upload-artifact@v7
+        with:
+          name: chimera-dxvk-reference-renderer-v14-runtime
+          path: runtime_bundle
+          compression-level: 0
+          if-no-files-found: error
