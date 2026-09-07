@@ -1,0 +1,107 @@
+name: Chimera DXVK V13.2 Isolation Controls
+
+on:
+  push:
+    branches:
+      - chimera-amd-nr
+    paths:
+      - '.github/workflows/chimera_dxvk_isolation_controls_v13_2.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-dxvk:
+    name: Build Chimera V13.2 isolation controls
+    runs-on: ubuntu-latest
+    container: archlinux/archlinux:base-devel
+
+    steps:
+      - name: Install build dependencies
+        run: pacman -Syu --needed --noconfirm git meson mingw-w64-gcc glslang python python-yaml
+
+      - name: Clone Chimera source and pinned DXVK
+        run: |
+          git clone --branch chimera-amd-nr --single-branch https://github.com/doubledd1403-hue/OptiScaler_DLSSNR.git chimera-source
+          git clone https://github.com/doitsujin/dxvk.git dxvk
+          cd dxvk
+          git checkout d7ac2580aa274a14a500e74edbe4ec6aae250e4a
+          git submodule update --init --recursive
+
+      - name: Reuse proven V1 through V13.1 chain
+        run: |
+          python3 - <<'PYIN'
+          import yaml
+          from pathlib import Path
+
+          wf = yaml.safe_load(
+              Path('chimera-source/.github/workflows/chimera_dxvk_reconstruction_shadows_v13_1.yml').read_text())
+          job = next(iter(wf['jobs'].values()))
+
+          steps = [
+            ('Reuse proven V1 through V13 chain', '/tmp/v132_inherit_v13.sh'),
+            ('Add V13.1 reconstruction and contact-shadow foundation', '/tmp/v132_inherit_v131.sh'),
+          ]
+
+          for step_name, out_path in steps:
+              step = next(s for s in job['steps'] if s.get('name') == step_name)
+              Path(out_path).write_text(step['run'])
+          PYIN
+
+          bash /tmp/v132_inherit_v13.sh
+          (
+            cd dxvk
+            bash /tmp/v132_inherit_v131.sh
+          )
+
+          grep -q 'CHIMERA_LIGHTING_V13_1_RECON_SHADOWS' dxvk/src/dxvk/shaders/dxvk_present_common.glsl
+          grep -q 'CHIMERA_DEPTH_STABILITY_V12_1' dxvk/src/d3d11/d3d11_context.cpp
+
+      - name: Add V13.2 bounce shadow and denoise isolation controls
+        working-directory: dxvk
+        run: |
+          echo 'CmZyb20gcGF0aGxpYiBpbXBvcnQgUGF0aAoKIyAtLS0gRXh0ZW5kIHJ1bnRpbWUgZGVidWcgc2VsZWN0b3IgZnJvbSAwLi41IHRvIDAuLjggLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLQpwID0gUGF0aCgic3JjL2R4dmsvZHh2a19zd2FwY2hhaW5fYmxpdHRlci5jcHAiKQpzID0gcC5yZWFkX3RleHQoZW5jb2Rpbmc9InV0Zi04IikKCmxpbmVzID0gcy5zcGxpdGxpbmVzKCkKY2hhbmdlZCA9IEZhbHNlCmZvciBpLCBsaW5lIGluIGVudW1lcmF0ZShsaW5lcyk6CiAgICBpZiAic2V0dGluZ3MuZGVidWdNb2RlID0iIGluIGxpbmU6CiAgICAgICAgaW5kZW50ID0gbGluZVs6bGVuKGxpbmUpIC0gbGVuKGxpbmUubHN0cmlwKCkpXQogICAgICAgIGxpbmVzW2ldID0gKAogICAgICAgICAgICBpbmRlbnQKICAgICAgICAgICAgKyAic2V0dGluZ3MuZGVidWdNb2RlID0gdiA+PSA4dSA/IDh1IDogKHYgPj0gN3UgPyA3dSA6ICIKICAgICAgICAgICAgICAiKHYgPj0gNnUgPyA2dSA6ICh2ID49IDV1ID8gNXUgOiAodiA+PSA0dSA/IDR1IDogIgogICAgICAgICAgICAgICIodiA+PSAzdSA/IDN1IDogKHYgPj0gMnUgPyAydSA6ICh2ID49IDF1ID8gMXUgOiAwdSkpKSkpKSk7IgogICAgICAgICkKICAgICAgICBjaGFuZ2VkID0gVHJ1ZQogICAgICAgIGJyZWFrCgppZiBub3QgY2hhbmdlZDoKICAgIHJhaXNlIFN5c3RlbUV4aXQoIlYxMy4yOiBydW50aW1lIGRlYnVnTW9kZSBwYXJzZXIgYXNzaWdubWVudCBub3QgZm91bmQiKQoKcC53cml0ZV90ZXh0KCJcbiIuam9pbihsaW5lcykgKyAiXG4iLCBlbmNvZGluZz0idXRmLTgiKQoKIyAtLS0gQWRkIGV4cGxpY2l0IGJvdW5jZS9zaGFkb3cgaXNvbGF0aW9uIGFuZCBkZW5vaXNlLW9mZiBBL0IgbW9kZXMgLS0tLS0tLS0tLS0tLS0tLQpwID0gUGF0aCgic3JjL2R4dmsvc2hhZGVycy9keHZrX3ByZXNlbnRfY29tbW9uLmdsc2wiKQpzID0gcC5yZWFkX3RleHQoZW5jb2Rpbmc9InV0Zi04IikKCnJlcXVpcmVkID0gWwogICAgIkNISU1FUkFfTElHSFRJTkdfVjEzXzFfUkVDT05fU0hBRE9XUyIsCiAgICAiY2hpbWVyYV9jb250YWN0X3NoYWRvd192MTMxIiwKICAgICJjaGltZXJhX2ZpbHRlcmVkX2hpdF9jb2xvdXJfdjEzIiwKICAgICJmbG9hdCByYXlfYW8iLAogICAgImZsb2F0IGNvbnRhY3RfYW8iLApdCmZvciB0b2tlbiBpbiByZXF1aXJlZDoKICAgIGlmIHRva2VuIG5vdCBpbiBzOgogICAgICAgIHJhaXNlIFN5c3RlbUV4aXQoZiJWMTMuMjogaW5oZXJpdGVkIHRva2VuIG1pc3Npbmc6IHt0b2tlbn0iKQoKbWFya2VyID0gIi8vIENISU1FUkFfTElHSFRJTkdfVjEzXzJfSVNPTEFUSU9OX0NPTlRST0xTIgppZiBtYXJrZXIgaW4gczoKICAgIHJhaXNlIFN5c3RlbUV4aXQoIlYxMy4yOiBtYXJrZXIgYWxyZWFkeSBwcmVzZW50IikKCm9sZF9oaXQgPSAidmVjMyBoaXRfY29sb3VyID0gY2hpbWVyYV9maWx0ZXJlZF9oaXRfY29sb3VyX3YxMyhoaXRfdXYpOyIKbmV3X2hpdCA9ICgKICAgICJ2ZWMzIGhpdF9jb2xvdXIgPSBjaGltZXJhX2RlYnVnX21vZGUgPT0gOHVcbiIKICAgICIgICAgICA/IGNoaW1lcmFfc291cmNlX2NvbG91cl92MTEoaGl0X3V2KVxuIgogICAgIiAgICAgIDogY2hpbWVyYV9maWx0ZXJlZF9oaXRfY29sb3VyX3YxMyhoaXRfdXYpOyIKKQppZiBvbGRfaGl0IG5vdCBpbiBzOgogICAgcmFpc2UgU3lzdGVtRXhpdCgiVjEzLjI6IFYxMyBmaWx0ZXJlZCBoaXQtY29sb3VyIGFuY2hvciBub3QgZm91bmQiKQpzID0gcy5yZXBsYWNlKG9sZF9oaXQsIG5ld19oaXQsIDEpCgpvbGRfYmxvY2sgPSAnJycgIGZsb2F0IGNvbmZpZGVuY2UgPSBzbW9vdGhzdGVwKDAuMCwgMC43NSwgaGl0X2ZyYWN0aW9uKTsKCiAgZmxvYXQgcmF5X2FvID0gc21vb3Roc3RlcCgKICAgIDAuMDUsIDAuNjUsCiAgICBtaXgod2VpZ2h0ZWRfY292ZXJhZ2UsIGhpdF9mcmFjdGlvbiwgMC42NSkpOwogIGZsb2F0IGNvbnRhY3RfYW8gPSBjaGltZXJhX2NvbnRhY3Rfc2hhZG93X3YxMzEoZGlzcGxheV9jb29yZCk7CgogIGZsb2F0IGFvID0gY2xhbXAocmF5X2FvICogMC41OCArIGNvbnRhY3RfYW8gKiAwLjcyLCAwLjAsIDEuMCk7CiAgY29sb3IucmdiICo9IDEuMCAtIHVzZXJfc3RyZW5ndGggKiAwLjEwNSAqIGFvOwoKICBpZiAoaGl0X3dlaWdodF9zdW0gPiAxLjBlLTUpIHsKICAgIHZlYzMgYm91bmNlID0gYXZlcmFnZV9oaXQgKiAoMC4zOCAqIGNvbmZpZGVuY2UgKiB1c2VyX3N0cmVuZ3RoKTsKICAgIGNvbG9yLnJnYiArPSBib3VuY2U7CiAgfQoKICByZXR1cm4gY29sb3I7JycnCgpuZXdfYmxvY2sgPSAnJycgIGZsb2F0IGNvbmZpZGVuY2UgPSBzbW9vdGhzdGVwKDAuMCwgMC43NSwgaGl0X2ZyYWN0aW9uKTsKCiAgZmxvYXQgcmF5X2FvID0gc21vb3Roc3RlcCgKICAgIDAuMDUsIDAuNjUsCiAgICBtaXgod2VpZ2h0ZWRfY292ZXJhZ2UsIGhpdF9mcmFjdGlvbiwgMC42NSkpOwogIGZsb2F0IGNvbnRhY3RfYW8gPSBjaGltZXJhX2NvbnRhY3Rfc2hhZG93X3YxMzEoZGlzcGxheV9jb29yZCk7CgogIGZsb2F0IGFvID0gY2xhbXAocmF5X2FvICogMC41OCArIGNvbnRhY3RfYW8gKiAwLjcyLCAwLjAsIDEuMCk7CgogIHZlYzMgYm91bmNlID0gdmVjMygwLjApOwogIGlmIChoaXRfd2VpZ2h0X3N1bSA+IDEuMGUtNSkKICAgIGJvdW5jZSA9IGF2ZXJhZ2VfaGl0ICogKDAuMzggKiBjb25maWRlbmNlICogdXNlcl9zdHJlbmd0aCk7CgogIC8vIERlYnVnIDY6IG9yaWdpbmFsIGdhbWUgKyBvbmx5IENoaW1lcmEgYm91bmNlZCBsaWdodC4KICBpZiAoY2hpbWVyYV9kZWJ1Z19tb2RlID09IDZ1KSB7CiAgICBjb2xvci5yZ2IgKz0gYm91bmNlOwogICAgcmV0dXJuIGNvbG9yOwogIH0KCiAgLy8gRGVidWcgNzogb3JpZ2luYWwgZ2FtZSArIG9ubHkgQ2hpbWVyYSBBTy9jb250YWN0L2NyZWFzZSBzaGFkb3dzLgogIGlmIChjaGltZXJhX2RlYnVnX21vZGUgPT0gN3UpIHsKICAgIGNvbG9yLnJnYiAqPSAxLjAgLSB1c2VyX3N0cmVuZ3RoICogMC4xMDUgKiBhbzsKICAgIHJldHVybiBjb2xvcjsKICB9CgogIC8vIERlYnVnIDg6IG5vcm1hbCBjb21wb3NpdGUsIGJ1dCBoaXQtY29sb3VyIGRlbm9pc2luZyBpcyBieXBhc3NlZCBhYm92ZS4KICBjb2xvci5yZ2IgKj0gMS4wIC0gdXNlcl9zdHJlbmd0aCAqIDAuMTA1ICogYW87CiAgY29sb3IucmdiICs9IGJvdW5jZTsKCiAgcmV0dXJuIGNvbG9yOycnJwoKaWYgb2xkX2Jsb2NrIG5vdCBpbiBzOgogICAgcmFpc2UgU3lzdGVtRXhpdCgiVjEzLjI6IFYxMy4xIGZpbmFsIGNvbXBvc2l0ZSBibG9jayBub3QgZm91bmQiKQpzID0gcy5yZXBsYWNlKG9sZF9ibG9jaywgbmV3X2Jsb2NrLCAxKQoKaW5zZXJ0X2FuY2hvciA9ICIvLyBDSElNRVJBX0xJR0hUSU5HX1YxM18xX1JFQ09OX1NIQURPV1MiCnMgPSBzLnJlcGxhY2UoCiAgICBpbnNlcnRfYW5jaG9yLAogICAgIi8vIENISU1FUkFfTElHSFRJTkdfVjEzXzJfSVNPTEFUSU9OX0NPTlRST0xTXG4iICsgaW5zZXJ0X2FuY2hvciwKICAgIDEsCikKCnAud3JpdGVfdGV4dChzLCBlbmNvZGluZz0idXRmLTgiKQoKY2hlY2sgPSBwLnJlYWRfdGV4dChlbmNvZGluZz0idXRmLTgiKQpmb3IgdG9rZW4gaW4gWwogICAgIkNISU1FUkFfTElHSFRJTkdfVjEzXzJfSVNPTEFUSU9OX0NPTlRST0xTIiwKICAgICJjaGltZXJhX2RlYnVnX21vZGUgPT0gNnUiLAogICAgImNoaW1lcmFfZGVidWdfbW9kZSA9PSA3dSIsCiAgICAiY2hpbWVyYV9kZWJ1Z19tb2RlID09IDh1IiwKXToKICAgIGlmIHRva2VuIG5vdCBpbiBjaGVjazoKICAgICAgICByYWlzZSBTeXN0ZW1FeGl0KGYiVjEzLjI6IHZlcmlmaWNhdGlvbiB0b2tlbiBtaXNzaW5nOiB7dG9rZW59IikKCnByaW50KCJDSElNRVJBIFYxMy4yIGlzb2xhdGlvbiBjb250cm9scyBwYXRjaDogUEFTUyIpCg==' | base64 -d > /tmp/chimera_v13_2_patch.py
+          python3 /tmp/chimera_v13_2_patch.py
+
+          grep -n 'CHIMERA_LIGHTING_V13_2_ISOLATION_CONTROLS' src/dxvk/shaders/dxvk_present_common.glsl
+          grep -n 'chimera_debug_mode == 6u' src/dxvk/shaders/dxvk_present_common.glsl
+          grep -n 'chimera_debug_mode == 7u' src/dxvk/shaders/dxvk_present_common.glsl
+          grep -n 'chimera_debug_mode == 8u' src/dxvk/shaders/dxvk_present_common.glsl
+
+      - name: Build DXVK x64 and x32
+        working-directory: dxvk
+        run: |
+          export VERSION_NAME="chimera-dxvk-isolation-controls-v13-2"
+          ./package-release.sh "$VERSION_NAME" build --no-package
+
+      - name: Verify and package runtime
+        working-directory: dxvk
+        run: |
+          set -euxo pipefail
+          root="build/dxvk-chimera-dxvk-isolation-controls-v13-2"
+          test -f "$root/x64/d3d11.dll"
+          test -f "$root/x64/dxgi.dll"
+          test -f "$root/x32/d3d11.dll"
+          test -f "$root/x32/dxgi.dll"
+
+          grep -q 'CHIMERA_LIGHTING_V13_2_ISOLATION_CONTROLS' src/dxvk/shaders/dxvk_present_common.glsl
+          grep -q 'chimera_debug_mode == 6u' src/dxvk/shaders/dxvk_present_common.glsl
+          grep -q 'chimera_debug_mode == 7u' src/dxvk/shaders/dxvk_present_common.glsl
+          grep -q 'chimera_debug_mode == 8u' src/dxvk/shaders/dxvk_present_common.glsl
+
+          mkdir -p ../runtime_bundle
+          cp "$root/x64/d3d11.dll" ../runtime_bundle/d3d11_64.dll
+          cp "$root/x64/dxgi.dll"  ../runtime_bundle/dxgi_64.dll
+          cp "$root/x32/d3d11.dll" ../runtime_bundle/d3d11_32.dll
+          cp "$root/x32/dxgi.dll"  ../runtime_bundle/dxgi_32.dll
+          cp LICENSE ../runtime_bundle/DXVK-LICENSE
+          sha256sum ../runtime_bundle/*.dll
+
+      - name: Upload DXVK runtime
+        uses: actions/upload-artifact@v7
+        with:
+          name: chimera-dxvk-isolation-controls-v13-2-runtime
+          path: runtime_bundle
+          compression-level: 0
+          if-no-files-found: error
