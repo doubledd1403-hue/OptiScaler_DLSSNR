@@ -1,0 +1,93 @@
+name: Chimera DXVK V15 Temporal Lighting Foundation
+
+on:
+  push:
+    branches:
+      - chimera-amd-nr
+    paths:
+      - '.github/workflows/chimera_dxvk_temporal_lighting_v15.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-dxvk:
+    name: Build Chimera V15 temporal lighting foundation
+    runs-on: ubuntu-latest
+    container: archlinux/archlinux:base-devel
+
+    steps:
+      - name: Install build dependencies
+        run: pacman -Syu --needed --noconfirm git meson mingw-w64-gcc glslang python python-yaml gzip
+
+      - name: Clone Chimera source and pinned DXVK
+        run: |
+          git clone --branch chimera-amd-nr --single-branch https://github.com/doubledd1403-hue/OptiScaler_DLSSNR.git chimera-source
+          git clone https://github.com/doitsujin/dxvk.git dxvk
+          cd dxvk
+          git checkout d7ac2580aa274a14a500e74edbe4ec6aae250e4a
+          git submodule update --init --recursive
+
+      - name: Reuse proven V1 through V13.1 chain
+        run: |
+          python3 - <<'PYIN'
+          import yaml
+          from pathlib import Path
+          wf = yaml.safe_load(
+              Path('chimera-source/.github/workflows/chimera_dxvk_reconstruction_shadows_v13_1.yml').read_text())
+          job = next(iter(wf['jobs'].values()))
+          for step_name, out_path in [
+              ('Reuse proven V1 through V13 chain', '/tmp/v15_inherit_v13.sh'),
+              ('Add V13.1 reconstruction and contact-shadow foundation', '/tmp/v15_inherit_v131.sh'),
+          ]:
+              step = next(s for s in job['steps'] if s.get('name') == step_name)
+              Path(out_path).write_text(step['run'])
+          PYIN
+          bash /tmp/v15_inherit_v13.sh
+          (cd dxvk && bash /tmp/v15_inherit_v131.sh)
+          grep -q 'CHIMERA_DEPTH_STABILITY_V12_1' dxvk/src/d3d11/d3d11_context.cpp
+          grep -q 'CHIMERA_LIGHTING_V13_1_RECON_SHADOWS' dxvk/src/dxvk/shaders/dxvk_present_common.glsl
+
+      - name: Add V15 persistent temporal lighting history
+        working-directory: dxvk
+        run: |
+          echo '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' | base64 -d | gzip -d > /tmp/chimera_v15_temporal_patch.py
+          python3 /tmp/chimera_v15_temporal_patch.py
+          grep -n 'CHIMERA_LIGHTING_V15_TEMPORAL_HISTORY' src/dxvk/shaders/dxvk_present_common.glsl
+          grep -n 'prepareChimeraTemporalHistory' src/dxvk/dxvk_swapchain_blitter.cpp
+          grep -n 's_chimera_history_out' src/dxvk/shaders/dxvk_present_common.glsl
+
+      - name: Build DXVK x64 and x32
+        working-directory: dxvk
+        run: |
+          export VERSION_NAME="chimera-dxvk-temporal-lighting-v15"
+          ./package-release.sh "$VERSION_NAME" build --no-package
+
+      - name: Verify and package runtime
+        working-directory: dxvk
+        run: |
+          set -euxo pipefail
+          root="build/dxvk-chimera-dxvk-temporal-lighting-v15"
+          test -f "$root/x64/d3d11.dll"
+          test -f "$root/x64/dxgi.dll"
+          test -f "$root/x32/d3d11.dll"
+          test -f "$root/x32/dxgi.dll"
+          grep -q 'CHIMERA_LIGHTING_V15_TEMPORAL_HISTORY' src/dxvk/shaders/dxvk_present_common.glsl
+          grep -q 'VK_FORMAT_R16G16B16A16_SFLOAT' src/dxvk/dxvk_swapchain_blitter.cpp
+          grep -q 'VK_DESCRIPTOR_TYPE_STORAGE_IMAGE' src/dxvk/dxvk_swapchain_blitter.cpp
+          mkdir -p ../runtime_bundle
+          cp "$root/x64/d3d11.dll" ../runtime_bundle/d3d11_64.dll
+          cp "$root/x64/dxgi.dll"  ../runtime_bundle/dxgi_64.dll
+          cp "$root/x32/d3d11.dll" ../runtime_bundle/d3d11_32.dll
+          cp "$root/x32/dxgi.dll"  ../runtime_bundle/dxgi_32.dll
+          cp LICENSE ../runtime_bundle/DXVK-LICENSE
+          sha256sum ../runtime_bundle/*.dll
+
+      - name: Upload DXVK runtime
+        uses: actions/upload-artifact@v7
+        with:
+          name: chimera-dxvk-temporal-lighting-v15-runtime
+          path: runtime_bundle
+          compression-level: 0
+          if-no-files-found: error
