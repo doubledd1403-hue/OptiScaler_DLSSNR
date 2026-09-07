@@ -1,0 +1,94 @@
+name: Chimera DXVK V11.2 Composite Visibility
+
+on:
+  push:
+    branches:
+      - chimera-amd-nr
+    paths:
+      - '.github/workflows/chimera_dxvk_composite_visibility_v11_2.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-dxvk:
+    name: Build Chimera V11.2 visible bounced-colour composite
+    runs-on: ubuntu-latest
+    container: archlinux/archlinux:base-devel
+
+    steps:
+      - name: Install build dependencies
+        run: pacman -Syu --needed --noconfirm git meson mingw-w64-gcc glslang python python-yaml
+
+      - name: Clone Chimera source and pinned DXVK
+        run: |
+          git clone --branch chimera-amd-nr --single-branch https://github.com/doubledd1403-hue/OptiScaler_DLSSNR.git chimera-source
+          git clone https://github.com/doitsujin/dxvk.git dxvk
+          cd dxvk
+          git checkout d7ac2580aa274a14a500e74edbe4ec6aae250e4a
+          git submodule update --init --recursive
+
+      - name: Prepare and apply inherited V1 through V11.1 patches
+        run: |
+          python3 - <<'PYIN'
+          import yaml
+          from pathlib import Path
+
+          wf = yaml.safe_load(Path('chimera-source/.github/workflows/chimera_dxvk_radiance_diag_v11_1.yml').read_text())
+          job = next(iter(wf['jobs'].values()))
+          names = [
+            ('Prepare inherited V1 through V10.1 patches', '/tmp/prepare.sh'),
+            ('Reuse V11 hit-UV indirect colour', '/tmp/v11.sh'),
+            ('Add V11.1 zero-rays and radiance diagnostics', '/tmp/v11_1.sh'),
+          ]
+          for name, out in names:
+              step = next(s for s in job['steps'] if s.get('name') == name)
+              Path(out).write_text(step['run'])
+          PYIN
+
+          bash /tmp/prepare.sh
+          cd dxvk
+          set -eux
+          for f in /tmp/chimera_patch_*.sh; do bash "$f"; done
+          bash /tmp/v11.sh
+          bash /tmp/v11_1.sh
+
+      - name: Add V11.2 visible composite
+        working-directory: dxvk
+        run: |
+          echo 'ZnJvbSBwYXRobGliIGltcG9ydCBQYXRoCnAgPSBQYXRoKCdzcmMvZHh2ay9zaGFkZXJzL2R4dmtfcHJlc2VudF9jb21tb24uZ2xzbCcpCnMgPSBwLnJlYWRfdGV4dChlbmNvZGluZz0ndXRmLTgnKQoKcmVwbHMgPSBbCignJycgIHZlYzMgaW5kaXJlY3Rfc3VtID0gdmVjMygwLjApOwogIGZsb2F0IGhpdF93ZWlnaHRfc3VtID0gMC4wOycnJywKICcnJyAgdmVjMyBpbmRpcmVjdF9zdW0gPSB2ZWMzKDAuMCk7CiAgZmxvYXQgaGl0X3dlaWdodF9zdW0gPSAwLjA7CiAgZmxvYXQgYWNjZXB0ZWRfaGl0cyA9IDAuMDsnJycpLAoKKCcnJyAgICBpZiAodyA+IDAuMCkgewogICAgICB2ZWMzIGhpdF9jb2xvdXIgPSBjaGltZXJhX3NvdXJjZV9jb2xvdXJfdjExKGhpdF91dik7CiAgICAgIGluZGlyZWN0X3N1bSArPSBtYXgoaGl0X2NvbG91ciwgdmVjMygwLjApKSAqIHc7CiAgICAgIGhpdF93ZWlnaHRfc3VtICs9IHc7CiAgICB9JycnLAogJycnICAgIGlmICh3ID4gMC4wKSB7CiAgICAgIHZlYzMgaGl0X2NvbG91ciA9IGNoaW1lcmFfc291cmNlX2NvbG91cl92MTEoaGl0X3V2KTsKICAgICAgaW5kaXJlY3Rfc3VtICs9IG1heChoaXRfY29sb3VyLCB2ZWMzKDAuMCkpICogdzsKICAgICAgaGl0X3dlaWdodF9zdW0gKz0gdzsKICAgICAgYWNjZXB0ZWRfaGl0cyArPSAxLjA7CiAgICB9JycnKSwKCignJycgIGZsb2F0IGNvdmVyYWdlID0gY2xhbXAoCiAgICBoaXRfd2VpZ2h0X3N1bSAvIGZsb2F0KHJlcXVlc3RlZCksIDAuMCwgMS4wKTsKCiAgdmVjMyBhdmVyYWdlX2hpdCA9IHZlYzMoMC4wKTsKICBpZiAoaGl0X3dlaWdodF9zdW0gPiAxLjBlLTUpCiAgICBhdmVyYWdlX2hpdCA9IG1pbihpbmRpcmVjdF9zdW0gLyBoaXRfd2VpZ2h0X3N1bSwgdmVjMygyLjApKTsKCiAgLy8gRGlhZ25vc3RpYyAxOiBzaG93IG9ubHkgYWNjZXB0ZWQgcmF5LWhpdCBjb3ZlcmFnZS4KICBpZiAoY2hpbWVyYV9kZWJ1Z19tb2RlID09IDF1KQogICAgcmV0dXJuIHZlYzQodmVjMyhjb3ZlcmFnZSksIDEuMCk7CgogIC8vIERpYWdub3N0aWMgMjogc2hvdyB0aGUgYWN0dWFsIGNvbG91ciBzYW1wbGVkIGF0IGFjY2VwdGVkIGhpdCBVVnMuCiAgLy8gQmxhY2sgbWVhbnMgdGhlcmUgd2VyZSBubyBhY2NlcHRlZCBoaXRzIGZvciB0aGF0IHBpeGVsLgogIGlmIChjaGltZXJhX2RlYnVnX21vZGUgPT0gMnUpCiAgICByZXR1cm4gdmVjNChjbGFtcChhdmVyYWdlX2hpdCwgdmVjMygwLjApLCB2ZWMzKDEuMCkpLCAxLjApOwoKICBmbG9hdCBhbyA9IHNtb290aHN0ZXAoMC4wNiwgMC41OCwgY292ZXJhZ2UpOwogIGNvbG9yLnJnYiAqPSAxLjAgLSB1c2VyX3N0cmVuZ3RoICogMC4xMCAqIGFvOwoKICBpZiAoaGl0X3dlaWdodF9zdW0gPiAxLjBlLTUpIHsKICAgIHZlYzMgYm91bmNlID0gYXZlcmFnZV9oaXQgKiBjb3ZlcmFnZTsKICAgIGNvbG9yLnJnYiArPSBib3VuY2UgKiAoMC4yMiAqIHVzZXJfc3RyZW5ndGgpOwogIH0KCiAgcmV0dXJuIGNvbG9yOycnJywKICcnJyAgZmxvYXQgd2VpZ2h0ZWRfY292ZXJhZ2UgPSBjbGFtcCgKICAgIGhpdF93ZWlnaHRfc3VtIC8gZmxvYXQocmVxdWVzdGVkKSwgMC4wLCAxLjApOwogIGZsb2F0IGhpdF9mcmFjdGlvbiA9IGNsYW1wKAogICAgYWNjZXB0ZWRfaGl0cyAvIGZsb2F0KHJlcXVlc3RlZCksIDAuMCwgMS4wKTsKCiAgdmVjMyBhdmVyYWdlX2hpdCA9IHZlYzMoMC4wKTsKICBpZiAoaGl0X3dlaWdodF9zdW0gPiAxLjBlLTUpCiAgICBhdmVyYWdlX2hpdCA9IG1pbihpbmRpcmVjdF9zdW0gLyBoaXRfd2VpZ2h0X3N1bSwgdmVjMygyLjApKTsKCiAgaWYgKGNoaW1lcmFfZGVidWdfbW9kZSA9PSAxdSkKICAgIHJldHVybiB2ZWM0KHZlYzMoaGl0X2ZyYWN0aW9uKSwgMS4wKTsKCiAgaWYgKGNoaW1lcmFfZGVidWdfbW9kZSA9PSAydSkKICAgIHJldHVybiB2ZWM0KGNsYW1wKGF2ZXJhZ2VfaGl0LCB2ZWMzKDAuMCksIHZlYzMoMS4wKSksIDEuMCk7CgogIGZsb2F0IGNvbmZpZGVuY2UgPSBzbW9vdGhzdGVwKDAuMCwgMC43NSwgaGl0X2ZyYWN0aW9uKTsKICBmbG9hdCBhbyA9IHNtb290aHN0ZXAoMC4wNSwgMC42NSwgbWl4KHdlaWdodGVkX2NvdmVyYWdlLCBoaXRfZnJhY3Rpb24sIDAuNjUpKTsKICBjb2xvci5yZ2IgKj0gMS4wIC0gdXNlcl9zdHJlbmd0aCAqIDAuMDggKiBhbzsKCiAgaWYgKGhpdF93ZWlnaHRfc3VtID4gMS4wZS01KSB7CiAgICB2ZWMzIGJvdW5jZSA9IGF2ZXJhZ2VfaGl0ICogKDAuMzggKiBjb25maWRlbmNlICogdXNlcl9zdHJlbmd0aCk7CiAgICBjb2xvci5yZ2IgKz0gYm91bmNlOwogIH0KCiAgcmV0dXJuIGNvbG9yOycnJykKXQoKZm9yIG9sZCwgbmV3IGluIHJlcGxzOgogICAgaWYgb2xkIG5vdCBpbiBzOgogICAgICAgIHJhaXNlIFN5c3RlbUV4aXQoJ1YxMS4yIGFuY2hvciBtaXNzaW5nJykKICAgIHMgPSBzLnJlcGxhY2Uob2xkLCBuZXcsIDEpCgptYXJrZXIgPSAnLy8gQ0hJTUVSQV9MSUdIVElOR19WMTFfMV9ESUFHTk9TVElDUycKaWYgbWFya2VyIG5vdCBpbiBzOgogICAgcmFpc2UgU3lzdGVtRXhpdCgnVjExLjIgbWFya2VyIG1pc3NpbmcnKQpzID0gcy5yZXBsYWNlKG1hcmtlciwgJy8vIENISU1FUkFfTElHSFRJTkdfVjExXzJfQ09NUE9TSVRFX1ZJU0lCSUxJVFlcbicgKyBtYXJrZXIsIDEpCgpwLndyaXRlX3RleHQocywgZW5jb2Rpbmc9J3V0Zi04JykKcHJpbnQoJ0NISU1FUkFfTElHSFRJTkdfVjExXzIgY29tcG9zaXRlIHZpc2liaWxpdHkgcGF0Y2g6IFBBU1MnKQo=' | base64 -d > /tmp/chimera_v11_2_patch.py
+          python3 /tmp/chimera_v11_2_patch.py
+          grep -n 'CHIMERA_LIGHTING_V11_2_COMPOSITE_VISIBILITY' src/dxvk/shaders/dxvk_present_common.glsl
+          grep -n 'accepted_hits' src/dxvk/shaders/dxvk_present_common.glsl
+
+      - name: Build DXVK x64 and x32
+        working-directory: dxvk
+        run: |
+          export VERSION_NAME="chimera-dxvk-composite-visibility-v11-2"
+          ./package-release.sh "$VERSION_NAME" build --no-package
+
+      - name: Verify and package runtime
+        working-directory: dxvk
+        run: |
+          set -euxo pipefail
+          root="build/dxvk-chimera-dxvk-composite-visibility-v11-2"
+          test -f "$root/x64/d3d11.dll"
+          test -f "$root/x64/dxgi.dll"
+          test -f "$root/x32/d3d11.dll"
+          test -f "$root/x32/dxgi.dll"
+          mkdir -p ../runtime_bundle
+          cp "$root/x64/d3d11.dll" ../runtime_bundle/d3d11_64.dll
+          cp "$root/x64/dxgi.dll"  ../runtime_bundle/dxgi_64.dll
+          cp "$root/x32/d3d11.dll" ../runtime_bundle/d3d11_32.dll
+          cp "$root/x32/dxgi.dll"  ../runtime_bundle/dxgi_32.dll
+          cp LICENSE ../runtime_bundle/DXVK-LICENSE
+          sha256sum ../runtime_bundle/*.dll
+
+      - name: Upload DXVK runtime
+        uses: actions/upload-artifact@v7
+        with:
+          name: chimera-dxvk-composite-visibility-v11-2-runtime
+          path: runtime_bundle
+          compression-level: 0
+          if-no-files-found: error
