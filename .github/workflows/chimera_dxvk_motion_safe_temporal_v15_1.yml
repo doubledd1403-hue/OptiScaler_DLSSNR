@@ -1,0 +1,99 @@
+name: Chimera DXVK V15.1 Motion-Safe Temporal Shadows
+
+on:
+  push:
+    branches:
+      - chimera-amd-nr
+    paths:
+      - '.github/workflows/chimera_dxvk_motion_safe_temporal_v15_1.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-dxvk:
+    name: Build Chimera V15.1 motion-safe temporal shadows
+    runs-on: ubuntu-latest
+    container: archlinux/archlinux:base-devel
+
+    steps:
+      - name: Install build dependencies
+        run: pacman -Syu --needed --noconfirm git meson mingw-w64-gcc glslang python python-yaml gzip
+
+      - name: Clone Chimera source and pinned DXVK
+        run: |
+          git clone --branch chimera-amd-nr --single-branch https://github.com/doubledd1403-hue/OptiScaler_DLSSNR.git chimera-source
+          git clone https://github.com/doitsujin/dxvk.git dxvk
+          cd dxvk
+          git checkout d7ac2580aa274a14a500e74edbe4ec6aae250e4a
+          git submodule update --init --recursive
+
+      - name: Reuse complete V15 temporal foundation
+        run: |
+          python3 - <<'PYIN'
+          import yaml
+          from pathlib import Path
+
+          wf = yaml.safe_load(
+              Path('chimera-source/.github/workflows/chimera_dxvk_temporal_lighting_v15.yml').read_text())
+          job = next(iter(wf['jobs'].values()))
+
+          for step_name, out_path in [
+              ('Reuse proven V1 through V13.1 chain', '/tmp/v151_inherit_base.sh'),
+              ('Add V15 persistent temporal lighting history', '/tmp/v151_inherit_v15.sh'),
+          ]:
+              step = next(s for s in job['steps'] if s.get('name') == step_name)
+              Path(out_path).write_text(step['run'])
+          PYIN
+
+          bash /tmp/v151_inherit_base.sh
+          (
+            cd dxvk
+            bash /tmp/v151_inherit_v15.sh
+          )
+
+          grep -q 'CHIMERA_LIGHTING_V15_TEMPORAL_HISTORY' dxvk/src/dxvk/shaders/dxvk_present_common.glsl
+          grep -q 'prepareChimeraTemporalHistory' dxvk/src/dxvk/dxvk_swapchain_blitter.cpp
+
+      - name: Add V15.1 motion-safe temporal reuse and shadow field
+        working-directory: dxvk
+        run: |
+          echo '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' | base64 -d | gzip -d > /tmp/chimera_v15_1_patch.py
+          python3 /tmp/chimera_v15_1_patch.py
+          grep -n 'CHIMERA_LIGHTING_V15_1_MOTION_SAFE_SHADOWS' src/dxvk/shaders/dxvk_present_common.glsl
+          grep -n 'chimera_shadow_field_v151' src/dxvk/shaders/dxvk_present_common.glsl
+          grep -n 'pixel_phase' src/dxvk/shaders/dxvk_present_common.glsl
+
+      - name: Build DXVK x64 and x32
+        working-directory: dxvk
+        run: |
+          export VERSION_NAME="chimera-dxvk-motion-safe-temporal-v15-1"
+          ./package-release.sh "$VERSION_NAME" build --no-package
+
+      - name: Verify and package runtime
+        working-directory: dxvk
+        run: |
+          set -euxo pipefail
+          root="build/dxvk-chimera-dxvk-motion-safe-temporal-v15-1"
+          test -f "$root/x64/d3d11.dll"
+          test -f "$root/x64/dxgi.dll"
+          test -f "$root/x32/d3d11.dll"
+          test -f "$root/x32/dxgi.dll"
+          grep -q 'CHIMERA_LIGHTING_V15_1_MOTION_SAFE_SHADOWS' src/dxvk/shaders/dxvk_present_common.glsl
+          grep -q 'CHIMERA_LIGHTING_V15_TEMPORAL_HISTORY' src/dxvk/shaders/dxvk_present_common.glsl
+          mkdir -p ../runtime_bundle
+          cp "$root/x64/d3d11.dll" ../runtime_bundle/d3d11_64.dll
+          cp "$root/x64/dxgi.dll"  ../runtime_bundle/dxgi_64.dll
+          cp "$root/x32/d3d11.dll" ../runtime_bundle/d3d11_32.dll
+          cp "$root/x32/dxgi.dll"  ../runtime_bundle/dxgi_32.dll
+          cp LICENSE ../runtime_bundle/DXVK-LICENSE
+          sha256sum ../runtime_bundle/*.dll
+
+      - name: Upload DXVK runtime
+        uses: actions/upload-artifact@v7
+        with:
+          name: chimera-dxvk-motion-safe-temporal-v15-1-runtime
+          path: runtime_bundle
+          compression-level: 0
+          if-no-files-found: error
