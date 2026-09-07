@@ -1,0 +1,98 @@
+name: Chimera DXVK V15.2 Receiver-Safe Colour Bleed
+
+on:
+  push:
+    branches:
+      - chimera-amd-nr
+    paths:
+      - '.github/workflows/chimera_dxvk_receiver_safe_colour_bleed_v15_2.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-dxvk:
+    name: Build Chimera V15.2 receiver-safe colour bleed
+    runs-on: ubuntu-latest
+    container: archlinux/archlinux:base-devel
+
+    steps:
+      - name: Install build dependencies
+        run: pacman -Syu --needed --noconfirm git meson mingw-w64-gcc glslang python python-yaml gzip
+
+      - name: Clone Chimera source and pinned DXVK
+        run: |
+          git clone --branch chimera-amd-nr --single-branch https://github.com/doubledd1403-hue/OptiScaler_DLSSNR.git chimera-source
+          git clone https://github.com/doitsujin/dxvk.git dxvk
+          cd dxvk
+          git checkout d7ac2580aa274a14a500e74edbe4ec6aae250e4a
+          git submodule update --init --recursive
+
+      - name: Reuse complete V15.1 foundation
+        run: |
+          python3 - <<'PYIN'
+          import yaml
+          from pathlib import Path
+
+          wf = yaml.safe_load(
+              Path('chimera-source/.github/workflows/chimera_dxvk_motion_safe_temporal_v15_1.yml').read_text())
+          job = next(iter(wf['jobs'].values()))
+
+          for step_name, out_path in [
+              ('Reuse complete V15 temporal foundation', '/tmp/v152_inherit_v15.sh'),
+              ('Add V15.1 motion-safe temporal reuse and shadow field', '/tmp/v152_inherit_v151.sh'),
+          ]:
+              step = next(s for s in job['steps'] if s.get('name') == step_name)
+              Path(out_path).write_text(step['run'])
+          PYIN
+
+          bash /tmp/v152_inherit_v15.sh
+          (
+            cd dxvk
+            bash /tmp/v152_inherit_v151.sh
+          )
+
+          grep -q 'CHIMERA_LIGHTING_V15_TEMPORAL_HISTORY' dxvk/src/dxvk/shaders/dxvk_present_common.glsl
+          grep -q 'CHIMERA_LIGHTING_V15_1_MOTION_SAFE_SHADOWS' dxvk/src/dxvk/shaders/dxvk_present_common.glsl
+
+      - name: Add V15.2 receiver-safe shadows and wide colour bleed
+        working-directory: dxvk
+        run: |
+          echo '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' | base64 -d | gzip -d > /tmp/chimera_v15_2_patch.py
+          python3 /tmp/chimera_v15_2_patch.py
+          grep -n 'CHIMERA_LIGHTING_V15_2_RECEIVER_SAFE_COLOUR_BLEED' src/dxvk/shaders/dxvk_present_common.glsl
+          grep -n 'chimera_wide_diffuse_history_v152' src/dxvk/shaders/dxvk_present_common.glsl
+          grep -n 'chimera_receiver_edge_guard_v152' src/dxvk/shaders/dxvk_present_common.glsl
+
+      - name: Build DXVK x64 and x32
+        working-directory: dxvk
+        run: |
+          export VERSION_NAME="chimera-dxvk-receiver-safe-colour-bleed-v15-2"
+          ./package-release.sh "$VERSION_NAME" build --no-package
+
+      - name: Verify and package runtime
+        working-directory: dxvk
+        run: |
+          set -euxo pipefail
+          root="build/dxvk-chimera-dxvk-receiver-safe-colour-bleed-v15-2"
+          test -f "$root/x64/d3d11.dll"
+          test -f "$root/x64/dxgi.dll"
+          test -f "$root/x32/d3d11.dll"
+          test -f "$root/x32/dxgi.dll"
+          grep -q 'CHIMERA_LIGHTING_V15_2_RECEIVER_SAFE_COLOUR_BLEED' src/dxvk/shaders/dxvk_present_common.glsl
+          mkdir -p ../runtime_bundle
+          cp "$root/x64/d3d11.dll" ../runtime_bundle/d3d11_64.dll
+          cp "$root/x64/dxgi.dll"  ../runtime_bundle/dxgi_64.dll
+          cp "$root/x32/d3d11.dll" ../runtime_bundle/d3d11_32.dll
+          cp "$root/x32/dxgi.dll"  ../runtime_bundle/dxgi_32.dll
+          cp LICENSE ../runtime_bundle/DXVK-LICENSE
+          sha256sum ../runtime_bundle/*.dll
+
+      - name: Upload DXVK runtime
+        uses: actions/upload-artifact@v7
+        with:
+          name: chimera-dxvk-receiver-safe-colour-bleed-v15-2-runtime
+          path: runtime_bundle
+          compression-level: 0
+          if-no-files-found: error
