@@ -1,0 +1,112 @@
+name: Chimera DXVK V12.1 Projection Stability
+
+on:
+  push:
+    branches:
+      - chimera-amd-nr
+    paths:
+      - '.github/workflows/chimera_dxvk_projection_stability_v12_1.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-dxvk:
+    name: Build Chimera V12.1 stable exact-depth runtime
+    runs-on: ubuntu-latest
+    container: archlinux/archlinux:base-devel
+
+    steps:
+      - name: Install build dependencies
+        run: pacman -Syu --needed --noconfirm git meson mingw-w64-gcc glslang python python-yaml
+
+      - name: Clone Chimera source and pinned DXVK
+        run: |
+          git clone --branch chimera-amd-nr --single-branch https://github.com/doubledd1403-hue/OptiScaler_DLSSNR.git chimera-source
+          git clone https://github.com/doitsujin/dxvk.git dxvk
+          cd dxvk
+          git checkout d7ac2580aa274a14a500e74edbe4ec6aae250e4a
+          git submodule update --init --recursive
+
+      - name: Reuse proven V1 through V12 FIX4 chain
+        run: |
+          python3 - <<'PYIN'
+          import yaml
+          from pathlib import Path
+          wf = yaml.safe_load(Path('chimera-source/.github/workflows/chimera_dxvk_exact_depth_v12_fix4.yml').read_text())
+          job = next(iter(wf['jobs'].values()))
+          wanted = {
+            'base': 'Reuse proven V1 through V11.2 renderer chain',
+            'prepare': 'Prepare corrected V12 patch',
+            'v12': 'Add V12 exact depth reconstruction and diagnostics FIX4',
+          }
+          for key, name in wanted.items():
+            step = next(s for s in job['steps'] if s.get('name') == name)
+            Path(f'/tmp/chimera_{key}.sh').write_text(step['run'])
+          PYIN
+          bash /tmp/chimera_base.sh
+          bash /tmp/chimera_prepare.sh
+          (cd dxvk && bash /tmp/chimera_v12.sh)
+
+      - name: Add V12.1 atomic projection + last-known-good + hysteresis
+        working-directory: dxvk
+        run: |
+          python3 - <<'PYIN'
+          from pathlib import Path
+          import base64, zlib
+          payload = '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'
+          Path('/tmp/chimera_v12_1_patch.py').write_bytes(zlib.decompress(base64.b64decode(payload)))
+          PYIN
+          python3 /tmp/chimera_v12_1_patch.py
+          grep -n 'CHIMERA_DEPTH_STABILITY_V12_1' src/d3d11/d3d11_context.cpp
+          grep -n 'MoveFileExW' src/d3d11/d3d11_context.cpp
+          grep -n 'bool complete = sawValid' src/dxvk/dxvk_swapchain_blitter.cpp
+
+      - name: Build DXVK x64 and x32
+        working-directory: dxvk
+        run: |
+          export VERSION_NAME="chimera-dxvk-projection-stability-v12-1"
+          ./package-release.sh "$VERSION_NAME" build --no-package
+
+      - name: Verify and package runtime
+        working-directory: dxvk
+        run: |
+          set -euxo pipefail
+          root="build/dxvk-chimera-dxvk-projection-stability-v12-1"
+          test -f "$root/x64/d3d11.dll"
+          test -f "$root/x64/dxgi.dll"
+          test -f "$root/x32/d3d11.dll"
+          test -f "$root/x32/dxgi.dll"
+
+          python3 - <<'PYIN'
+          from pathlib import Path
+          p = Path('build/dxvk-chimera-dxvk-projection-stability-v12-1/x64/d3d11.dll')
+          data = p.read_bytes()
+          for marker in (
+              b'CHIMERA_DXVK_PROBE_V1',
+              b'CHIMERA_DSV_CREATE_V1',
+              b'CHIMERA_PROJECTION_V8',
+              b'CHIMERA_DEPTH_FOUNDATION_V12',
+              b'CHIMERA_DEPTH_STABILITY_V12_1',
+          ):
+              if marker not in data:
+                  raise SystemExit(f'Missing retained binary marker: {marker!r}')
+          print('V12.1 retained runtime marker verification: PASS')
+          PYIN
+
+          mkdir -p ../runtime_bundle
+          cp "$root/x64/d3d11.dll" ../runtime_bundle/d3d11_64.dll
+          cp "$root/x64/dxgi.dll"  ../runtime_bundle/dxgi_64.dll
+          cp "$root/x32/d3d11.dll" ../runtime_bundle/d3d11_32.dll
+          cp "$root/x32/dxgi.dll"  ../runtime_bundle/dxgi_32.dll
+          cp LICENSE ../runtime_bundle/DXVK-LICENSE
+          sha256sum ../runtime_bundle/*.dll
+
+      - name: Upload DXVK runtime
+        uses: actions/upload-artifact@v7
+        with:
+          name: chimera-dxvk-projection-stability-v12-1-runtime
+          path: runtime_bundle
+          compression-level: 0
+          if-no-files-found: error
