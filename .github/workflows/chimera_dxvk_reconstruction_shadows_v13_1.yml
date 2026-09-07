@@ -1,0 +1,104 @@
+name: Chimera DXVK V13.1 Reconstruction and Contact Shadows
+
+on:
+  push:
+    branches:
+      - chimera-amd-nr
+    paths:
+      - '.github/workflows/chimera_dxvk_reconstruction_shadows_v13_1.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-dxvk:
+    name: Build Chimera V13.1 reconstruction + contact shadows
+    runs-on: ubuntu-latest
+    container: archlinux/archlinux:base-devel
+
+    steps:
+      - name: Install build dependencies
+        run: pacman -Syu --needed --noconfirm git meson mingw-w64-gcc glslang python python-yaml
+
+      - name: Clone Chimera source and pinned DXVK
+        run: |
+          git clone --branch chimera-amd-nr --single-branch https://github.com/doubledd1403-hue/OptiScaler_DLSSNR.git chimera-source
+          git clone https://github.com/doitsujin/dxvk.git dxvk
+          cd dxvk
+          git checkout d7ac2580aa274a14a500e74edbe4ec6aae250e4a
+          git submodule update --init --recursive
+
+      - name: Reuse proven V1 through V13 chain
+        run: |
+          python3 - <<'PYIN'
+          import yaml
+          from pathlib import Path
+
+          wf = yaml.safe_load(
+              Path('chimera-source/.github/workflows/chimera_dxvk_spatial_denoise_v13.yml').read_text())
+          job = next(iter(wf['jobs'].values()))
+
+          steps = [
+            ('Reuse proven V1 through V12.1 FIX2 chain', '/tmp/v131_inherit_v121.sh'),
+            ('Add V13 depth-aware spatial radiance denoise', '/tmp/v131_inherit_v13.sh'),
+          ]
+
+          for step_name, out_path in steps:
+              step = next(s for s in job['steps'] if s.get('name') == step_name)
+              Path(out_path).write_text(step['run'])
+          PYIN
+
+          bash /tmp/v131_inherit_v121.sh
+          (
+            cd dxvk
+            bash /tmp/v131_inherit_v13.sh
+          )
+
+          grep -q 'CHIMERA_DEPTH_STABILITY_V12_1' dxvk/src/d3d11/d3d11_context.cpp
+          grep -q 'CHIMERA_LIGHTING_V13_SPATIAL_RADIANCE_DENOISE' dxvk/src/dxvk/shaders/dxvk_present_common.glsl
+
+      - name: Add V13.1 reconstruction and contact-shadow foundation
+        working-directory: dxvk
+        run: |
+          echo 'CmZyb20gcGF0aGxpYiBpbXBvcnQgUGF0aAppbXBvcnQgcmUKCnAgPSBQYXRoKCJzcmMvZHh2ay9zaGFkZXJzL2R4dmtfcHJlc2VudF9jb21tb24uZ2xzbCIpCnMgPSBwLnJlYWRfdGV4dChlbmNvZGluZz0idXRmLTgiKQoKcmVxdWlyZWQgPSBbCiAgICAiQ0hJTUVSQV9MSUdIVElOR19WMTNfU1BBVElBTF9SQURJQU5DRV9ERU5PSVNFIiwKICAgICJjaGltZXJhX2ZpbHRlcmVkX2hpdF9jb2xvdXJfdjEzIiwKICAgICJjaGltZXJhX2hpdF92aWV3X3pfdjEzIiwKICAgICJjaGltZXJhX2RlcHRoX25vcm1hbCIsCiAgICAiY2hpbWVyYV9kZXB0aF90b192aWV3X3pfdjEyIiwKICAgICJDSElNRVJBX0xJR0hUSU5HX1YxMV8yX0NPTVBPU0lURV9WSVNJQklMSVRZIiwKXQpmb3IgdG9rZW4gaW4gcmVxdWlyZWQ6CiAgICBpZiB0b2tlbiBub3QgaW4gczoKICAgICAgICByYWlzZSBTeXN0ZW1FeGl0KGYiVjEzLjE6IHJlcXVpcmVkIGluaGVyaXRlZCB0b2tlbiBtaXNzaW5nOiB7dG9rZW59IikKCm1hcmtlciA9ICIvLyBDSElNRVJBX0xJR0hUSU5HX1YxM18xX1JFQ09OX1NIQURPV1MiCmlmIG1hcmtlciBpbiBzOgogICAgcmFpc2UgU3lzdGVtRXhpdCgiVjEzLjE6IG1hcmtlciBhbHJlYWR5IHByZXNlbnQiKQoKcGF0ID0gcmUuY29tcGlsZSgKICAgIHIidmVjMyBjaGltZXJhX2ZpbHRlcmVkX2hpdF9jb2xvdXJfdjEzXCh2ZWMyIGhpdF91dlwpIFx7Lio/XG5cfSIsCiAgICByZS5TLAopCm0gPSBwYXQuc2VhcmNoKHMpCmlmIG5vdCBtOgogICAgcmFpc2UgU3lzdGVtRXhpdCgiVjEzLjE6IFYxMyBoaXQtY29sb3VyIGZpbHRlciBmdW5jdGlvbiBub3QgZm91bmQiKQoKbmV3X2ZpbHRlciA9IHInJyd2ZWMzIGNoaW1lcmFfZmlsdGVyZWRfaGl0X2NvbG91cl92MTModmVjMiBoaXRfdXYpIHsKICBpdmVjMiBleHRlbnRfaSA9IG1heChjaGltZXJhX2RlcHRoX2V4dGVudCwgaXZlYzIoMSkpOwogIHZlYzIgZXh0ZW50ID0gdmVjMihleHRlbnRfaSk7CiAgdmVjMiBwaXhlbCA9IDEuMCAvIGV4dGVudDsKCiAgdmVjMiBjZW50ZXJfdXYgPSBjbGFtcCgKICAgIGhpdF91diwKICAgIHBpeGVsICogMC41LAogICAgdmVjMigxLjApIC0gcGl4ZWwgKiAwLjUpOwoKICB2ZWMzIGNlbnRlciA9IG1heChjaGltZXJhX3NvdXJjZV9jb2xvdXJfdjExKGNlbnRlcl91diksIHZlYzMoMC4wKSk7CiAgZmxvYXQgY2VudGVyX3ogPSBjaGltZXJhX2hpdF92aWV3X3pfdjEzKGNlbnRlcl91dik7CiAgZmxvYXQgY2VudGVyX2x1bWEgPSBjaGltZXJhX2x1bWFfdjEzKGNlbnRlcik7CgogIHZlYzMgc3VtID0gY2VudGVyICogMi4yMDsKICBmbG9hdCB3ZWlnaHRfc3VtID0gMi4yMDsKCiAgZm9yIChpbnQgeSA9IC0xOyB5IDw9IDE7IHkrKykgewogICAgZm9yIChpbnQgeCA9IC0xOyB4IDw9IDE7IHgrKykgewogICAgICBpZiAoeCA9PSAwICYmIHkgPT0gMCkKICAgICAgICBjb250aW51ZTsKCiAgICAgIHZlYzIgbyA9IHZlYzIoZmxvYXQoeCksIGZsb2F0KHkpKTsKICAgICAgdmVjMiB1diA9IGNsYW1wKAogICAgICAgIGNlbnRlcl91diArIG8gKiBwaXhlbCwKICAgICAgICBwaXhlbCAqIDAuNSwKICAgICAgICB2ZWMyKDEuMCkgLSBwaXhlbCAqIDAuNSk7CgogICAgICBmbG9hdCB6ID0gY2hpbWVyYV9oaXRfdmlld196X3YxMyh1dik7CiAgICAgIGZsb2F0IHJlbF96ID0gYWJzKHogLSBjZW50ZXJfeikgLyBtYXgoYWJzKGNlbnRlcl96KSwgMC4wNSk7CiAgICAgIGZsb2F0IGRlcHRoX3cgPSBleHAyKC1yZWxfeiAqIDcyLjApOwoKICAgICAgdmVjMyBzYW1wbGVfY29sb3VyID0gbWF4KGNoaW1lcmFfc291cmNlX2NvbG91cl92MTEodXYpLCB2ZWMzKDAuMCkpOwogICAgICBmbG9hdCBzYW1wbGVfbHVtYSA9IGNoaW1lcmFfbHVtYV92MTMoc2FtcGxlX2NvbG91cik7CiAgICAgIGZsb2F0IGx1bWFfZGVsdGEgPSBhYnMoc2FtcGxlX2x1bWEgLSBjZW50ZXJfbHVtYSkKICAgICAgICAgICAgICAgICAgICAgICAvIG1heChtYXgoY2VudGVyX2x1bWEsIHNhbXBsZV9sdW1hKSwgMC4xMCk7CiAgICAgIGZsb2F0IGx1bWFfdyA9IG1peCgwLjI4LCAxLjAsIGV4cDIoLWx1bWFfZGVsdGEgKiA0LjApKTsKCiAgICAgIGZsb2F0IHNwYXRpYWxfdyA9ICh4ID09IDAgfHwgeSA9PSAwKSA/IDAuNzggOiAwLjU1OwogICAgICBmbG9hdCB3ID0gc3BhdGlhbF93ICogZGVwdGhfdyAqIGx1bWFfdzsKICAgICAgc3VtICs9IHNhbXBsZV9jb2xvdXIgKiB3OwogICAgICB3ZWlnaHRfc3VtICs9IHc7CiAgICB9CiAgfQoKICB2ZWMzIGZpbHRlcmVkID0gc3VtIC8gbWF4KHdlaWdodF9zdW0sIDEuMGUtNSk7CiAgcmV0dXJuIG1peChjZW50ZXIsIGZpbHRlcmVkLCAwLjgyKTsKfScnJwpzID0gc1s6bS5zdGFydCgpXSArIG5ld19maWx0ZXIgKyBzW20uZW5kKCk6XQoKYW5jaG9yID0gInZlYzQgY2hpbWVyYV9hcHBseV9saWdodGluZ192MTEodmVjNCBjb2xvciwgaXZlYzIgZGlzcGxheV9jb29yZCkgeyIKaWYgYW5jaG9yIG5vdCBpbiBzOgogICAgcmFpc2UgU3lzdGVtRXhpdCgiVjEzLjE6IGxpZ2h0aW5nIGZ1bmN0aW9uIGFuY2hvciBtaXNzaW5nIikKCnNoYWRvd19oZWxwZXIgPSByJycnCi8vIENISU1FUkFfTElHSFRJTkdfVjEzXzFfUkVDT05fU0hBRE9XUwovLwovLyBDb25zZXJ2YXRpdmUgc2NyZWVuLXNwYWNlIGNvbnRhY3QvY3JlYXNlIHNoYWRvdyB0ZXJtLiBUaGlzIGlzIG5vdCBlbmdpbmUKLy8gY2FzdC1zaGFkb3cgcmVwbGFjZW1lbnQgYW5kIG5vdCByYXkgdHJhY2luZy4gSXQgdXNlcyBleGFjdCByZWNvbnN0cnVjdGVkCi8vIGRlcHRoIHBsdXMgZGVwdGgtZGVyaXZlZCBub3JtYWxzIHRvIGltcHJvdmUgZ3JvdW5kaW5nIGFuZCBsb2NhbCBzaGFkb3dpbmcuCmZsb2F0IGNoaW1lcmFfY29udGFjdF9zaGFkb3dfdjEzMShpdmVjMiBkaXNwbGF5X2Nvb3JkKSB7CiAgaXZlYzIgZXh0ZW50ID0gbWF4KGNoaW1lcmFfZGVwdGhfZXh0ZW50LCBpdmVjMigxKSk7CiAgaXZlYzIgcDAgPSBjbGFtcChkaXNwbGF5X2Nvb3JkLCBpdmVjMigwKSwgZXh0ZW50IC0gaXZlYzIoMSkpOwoKICBmbG9hdCBkMCA9IGNoaW1lcmFfZGVwdGhfcmF3KHAwKTsKICBpZiAoZDAgPD0gMS4wZS01KQogICAgcmV0dXJuIDAuMDsKCiAgZmxvYXQgejAgPSBjaGltZXJhX2RlcHRoX3RvX3ZpZXdfel92MTIoZDApOwogIHZlYzMgbjAgPSBub3JtYWxpemUoY2hpbWVyYV9kZXB0aF9ub3JtYWwocDApKTsKCiAgY29uc3QgaXZlYzIgZGlyc1s4XSA9IGl2ZWMyWzhdKAogICAgaXZlYzIoIDEsIDApLCBpdmVjMigtMSwgMCksIGl2ZWMyKDAsICAxKSwgaXZlYzIoMCwgLTEpLAogICAgaXZlYzIoIDEsIDEpLCBpdmVjMigtMSwgMSksIGl2ZWMyKDEsIC0xKSwgaXZlYzIoLTEsLTEpKTsKCiAgZmxvYXQgb2NjID0gMC4wOwogIGZsb2F0IHdzdW0gPSAwLjA7CgogIGZvciAoaW50IHJpbmcgPSAwOyByaW5nIDwgMjsgcmluZysrKSB7CiAgICBpbnQgcmFkaXVzID0gcmluZyA9PSAwID8gMiA6IDU7CiAgICBmbG9hdCByaW5nX3cgPSByaW5nID09IDAgPyAxLjAgOiAwLjU4OwoKICAgIGZvciAoaW50IGkgPSAwOyBpIDwgODsgaSsrKSB7CiAgICAgIGl2ZWMyIHEgPSBjbGFtcChwMCArIGRpcnNbaV0gKiByYWRpdXMsIGl2ZWMyKDApLCBleHRlbnQgLSBpdmVjMigxKSk7CiAgICAgIGZsb2F0IGRxID0gY2hpbWVyYV9kZXB0aF9yYXcocSk7CiAgICAgIGlmIChkcSA8PSAxLjBlLTUpCiAgICAgICAgY29udGludWU7CgogICAgICBmbG9hdCB6cSA9IGNoaW1lcmFfZGVwdGhfdG9fdmlld196X3YxMihkcSk7CiAgICAgIHZlYzMgbnEgPSBub3JtYWxpemUoY2hpbWVyYV9kZXB0aF9ub3JtYWwocSkpOwoKICAgICAgZmxvYXQgcmVsX3ogPSBhYnMoenEgLSB6MCkgLyBtYXgoYWJzKHowKSwgMC4wNSk7CiAgICAgIGZsb2F0IHByb3hpbWl0eSA9IGV4cDIoLXJlbF96ICogMjIuMCk7CgogICAgICBmbG9hdCBjcmVhc2UgPSBjbGFtcCgxLjAgLSBkb3QobjAsIG5xKSwgMC4wLCAxLjApOwogICAgICBmbG9hdCBuZWFyZXIgPSBjbGFtcCgoejAgLSB6cSkgLyBtYXgoYWJzKHowKSAqIDAuMDM1LCAwLjAxNSksIDAuMCwgMS4wKTsKCiAgICAgIGZsb2F0IHNhbXBsZV9vY2MgPSBjbGFtcChjcmVhc2UgKiAxLjM1ICsgbmVhcmVyICogMC40NSwgMC4wLCAxLjApOwogICAgICBmbG9hdCB3ID0gcmluZ193ICogbWl4KDAuNDIsIDEuMCwgcHJveGltaXR5KTsKICAgICAgb2NjICs9IHNhbXBsZV9vY2MgKiB3OwogICAgICB3c3VtICs9IHc7CiAgICB9CiAgfQoKICBpZiAod3N1bSA8PSAxLjBlLTUpCiAgICByZXR1cm4gMC4wOwoKICBmbG9hdCB2ID0gb2NjIC8gd3N1bTsKICByZXR1cm4gc21vb3Roc3RlcCgwLjAzNSwgMC4zNCwgdik7Cn0KCicnJwpzID0gcy5yZXBsYWNlKGFuY2hvciwgc2hhZG93X2hlbHBlciArIGFuY2hvciwgMSkKCm9sZF9hbyA9ICcnJyAgZmxvYXQgY29uZmlkZW5jZSA9IHNtb290aHN0ZXAoMC4wLCAwLjc1LCBoaXRfZnJhY3Rpb24pOwogIGZsb2F0IGFvID0gc21vb3Roc3RlcCgwLjA1LCAwLjY1LCBtaXgod2VpZ2h0ZWRfY292ZXJhZ2UsIGhpdF9mcmFjdGlvbiwgMC42NSkpOwogIGNvbG9yLnJnYiAqPSAxLjAgLSB1c2VyX3N0cmVuZ3RoICogMC4wOCAqIGFvOycnJwoKbmV3X2FvID0gJycnICBmbG9hdCBjb25maWRlbmNlID0gc21vb3Roc3RlcCgwLjAsIDAuNzUsIGhpdF9mcmFjdGlvbik7CgogIGZsb2F0IHJheV9hbyA9IHNtb290aHN0ZXAoCiAgICAwLjA1LCAwLjY1LAogICAgbWl4KHdlaWdodGVkX2NvdmVyYWdlLCBoaXRfZnJhY3Rpb24sIDAuNjUpKTsKICBmbG9hdCBjb250YWN0X2FvID0gY2hpbWVyYV9jb250YWN0X3NoYWRvd192MTMxKGRpc3BsYXlfY29vcmQpOwoKICBmbG9hdCBhbyA9IGNsYW1wKHJheV9hbyAqIDAuNTggKyBjb250YWN0X2FvICogMC43MiwgMC4wLCAxLjApOwogIGNvbG9yLnJnYiAqPSAxLjAgLSB1c2VyX3N0cmVuZ3RoICogMC4xMDUgKiBhbzsnJycKCmlmIG9sZF9hbyBub3QgaW4gczoKICAgIHJhaXNlIFN5c3RlbUV4aXQoIlYxMy4xOiBWMTEuMiBBTyBjb21wb3NpdGUgYW5jaG9yIG1pc3NpbmciKQpzID0gcy5yZXBsYWNlKG9sZF9hbywgbmV3X2FvLCAxKQoKcC53cml0ZV90ZXh0KHMsIGVuY29kaW5nPSJ1dGYtOCIpCgpjaGVjayA9IHAucmVhZF90ZXh0KGVuY29kaW5nPSJ1dGYtOCIpCmZvciB0b2tlbiBpbiAoCiAgICAiQ0hJTUVSQV9MSUdIVElOR19WMTNfMV9SRUNPTl9TSEFET1dTIiwKICAgICJjaGltZXJhX2NvbnRhY3Rfc2hhZG93X3YxMzEiLAogICAgImZsb2F0IHJheV9hbyIsCiAgICAiZmxvYXQgY29udGFjdF9hbyIsCik6CiAgICBpZiB0b2tlbiBub3QgaW4gY2hlY2s6CiAgICAgICAgcmFpc2UgU3lzdGVtRXhpdChmIlYxMy4xOiB2ZXJpZmljYXRpb24gdG9rZW4gbWlzc2luZzoge3Rva2VufSIpCgpwcmludCgiQ0hJTUVSQSBWMTMuMSByZWNvbnN0cnVjdGlvbiArIGNvbnRhY3Qtc2hhZG93IHBhdGNoOiBQQVNTIikK' | base64 -d > /tmp/chimera_v13_1_patch.py
+          python3 /tmp/chimera_v13_1_patch.py
+
+          grep -n 'CHIMERA_LIGHTING_V13_1_RECON_SHADOWS' src/dxvk/shaders/dxvk_present_common.glsl
+          grep -n 'chimera_contact_shadow_v131' src/dxvk/shaders/dxvk_present_common.glsl
+
+      - name: Build DXVK x64 and x32
+        working-directory: dxvk
+        run: |
+          export VERSION_NAME="chimera-dxvk-reconstruction-shadows-v13-1"
+          ./package-release.sh "$VERSION_NAME" build --no-package
+
+      - name: Verify and package runtime
+        working-directory: dxvk
+        run: |
+          set -euxo pipefail
+          root="build/dxvk-chimera-dxvk-reconstruction-shadows-v13-1"
+          test -f "$root/x64/d3d11.dll"
+          test -f "$root/x64/dxgi.dll"
+          test -f "$root/x32/d3d11.dll"
+          test -f "$root/x32/dxgi.dll"
+
+          grep -q 'CHIMERA_LIGHTING_V13_1_RECON_SHADOWS' src/dxvk/shaders/dxvk_present_common.glsl
+          grep -q 'chimera_contact_shadow_v131' src/dxvk/shaders/dxvk_present_common.glsl
+          grep -q 'CHIMERA_LIGHTING_V13_SPATIAL_RADIANCE_DENOISE' src/dxvk/shaders/dxvk_present_common.glsl
+
+          mkdir -p ../runtime_bundle
+          cp "$root/x64/d3d11.dll" ../runtime_bundle/d3d11_64.dll
+          cp "$root/x64/dxgi.dll"  ../runtime_bundle/dxgi_64.dll
+          cp "$root/x32/d3d11.dll" ../runtime_bundle/d3d11_32.dll
+          cp "$root/x32/dxgi.dll"  ../runtime_bundle/dxgi_32.dll
+          cp LICENSE ../runtime_bundle/DXVK-LICENSE
+          sha256sum ../runtime_bundle/*.dll
+
+      - name: Upload DXVK runtime
+        uses: actions/upload-artifact@v7
+        with:
+          name: chimera-dxvk-reconstruction-shadows-v13-1-runtime
+          path: runtime_bundle
+          compression-level: 0
+          if-no-files-found: error
