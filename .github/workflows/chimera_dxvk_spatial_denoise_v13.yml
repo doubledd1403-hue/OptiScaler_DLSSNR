@@ -1,0 +1,107 @@
+name: Chimera DXVK V13 Spatial Radiance Denoise
+
+on:
+  push:
+    branches:
+      - chimera-amd-nr
+    paths:
+      - '.github/workflows/chimera_dxvk_spatial_denoise_v13.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-dxvk:
+    name: Build Chimera V13 spatial radiance denoise
+    runs-on: ubuntu-latest
+    container: archlinux/archlinux:base-devel
+
+    steps:
+      - name: Install build dependencies
+        run: pacman -Syu --needed --noconfirm git meson mingw-w64-gcc glslang python python-yaml
+
+      - name: Clone Chimera source and pinned DXVK
+        run: |
+          git clone --branch chimera-amd-nr --single-branch https://github.com/doubledd1403-hue/OptiScaler_DLSSNR.git chimera-source
+          git clone https://github.com/doitsujin/dxvk.git dxvk
+          cd dxvk
+          git checkout d7ac2580aa274a14a500e74edbe4ec6aae250e4a
+          git submodule update --init --recursive
+
+      - name: Reuse proven V1 through V12.1 FIX2 chain
+        run: |
+          python3 - <<'PYIN'
+          import yaml
+          from pathlib import Path
+
+          wf = yaml.safe_load(
+              Path('chimera-source/.github/workflows/chimera_dxvk_projection_stability_v12_1_fix2.yml').read_text())
+          job = next(iter(wf['jobs'].values()))
+
+          names = {
+            'base': 'Reuse proven V1 through V12 FIX4 chain safely',
+            'v121': 'Apply V12.1 projection-stability patch',
+          }
+          paths = {
+            'base': Path('/tmp/v13_inherit_v12.sh'),
+            'v121': Path('/tmp/v13_inherit_v121.sh'),
+          }
+
+          for key, step_name in names.items():
+              step = next(s for s in job['steps'] if s.get('name') == step_name)
+              paths[key].write_text(step['run'])
+          PYIN
+
+          bash /tmp/v13_inherit_v12.sh
+          bash /tmp/v13_inherit_v121.sh
+
+          grep -q 'CHIMERA_DEPTH_FOUNDATION_V12' dxvk/src/d3d11/d3d11_context.cpp
+          grep -q 'CHIMERA_DEPTH_STABILITY_V12_1' dxvk/src/d3d11/d3d11_context.cpp
+          grep -q 'CHIMERA_LIGHTING_V11_2_COMPOSITE_VISIBILITY' dxvk/src/dxvk/shaders/dxvk_present_common.glsl
+
+      - name: Add V13 depth-aware spatial radiance denoise
+        working-directory: dxvk
+        run: |
+          echo 'CmZyb20gcGF0aGxpYiBpbXBvcnQgUGF0aAoKcCA9IFBhdGgoInNyYy9keHZrL3NoYWRlcnMvZHh2a19wcmVzZW50X2NvbW1vbi5nbHNsIikKcyA9IHAucmVhZF90ZXh0KGVuY29kaW5nPSJ1dGYtOCIpCgpyZXF1aXJlZCA9IFsKICAgICJDSElNRVJBX0xJR0hUSU5HX1YxMV8yX0NPTVBPU0lURV9WSVNJQklMSVRZIiwKICAgICJDSElNRVJBX0RFUFRIX0ZPVU5EQVRJT05fVjEyIiwKICAgICJjaGltZXJhX2RlcHRoX3RvX3ZpZXdfel92MTIiLAogICAgImNoaW1lcmFfc291cmNlX2NvbG91cl92MTEiLAogICAgInNfY2hpbWVyYV9kZXB0aCIsCiAgICAiY2hpbWVyYV9kZXB0aF9jb29yZCIsCl0KZm9yIHRva2VuIGluIHJlcXVpcmVkOgogICAgaWYgdG9rZW4gbm90IGluIHM6CiAgICAgICAgcmFpc2UgU3lzdGVtRXhpdChmIlYxMzogcmVxdWlyZWQgaW5oZXJpdGVkIHRva2VuIG1pc3Npbmc6IHt0b2tlbn0iKQoKbWFya2VyID0gIi8vIENISU1FUkFfTElHSFRJTkdfVjEzX1NQQVRJQUxfUkFESUFOQ0VfREVOT0lTRSIKaWYgbWFya2VyIGluIHM6CiAgICByYWlzZSBTeXN0ZW1FeGl0KCJWMTM6IG1hcmtlciBhbHJlYWR5IHByZXNlbnQiKQoKYW5jaG9yID0gInZlYzQgY2hpbWVyYV9hcHBseV9saWdodGluZ192MTEodmVjNCBjb2xvciwgaXZlYzIgZGlzcGxheV9jb29yZCkgeyIKaWYgYW5jaG9yIG5vdCBpbiBzOgogICAgcmFpc2UgU3lzdGVtRXhpdCgiVjEzOiBsaWdodGluZyBmdW5jdGlvbiBhbmNob3IgbWlzc2luZyIpCgpoZWxwZXIgPSByJycnCi8vIENISU1FUkFfTElHSFRJTkdfVjEzX1NQQVRJQUxfUkFESUFOQ0VfREVOT0lTRQovLwovLyBTcGF0aWFsIHJhZGlhbmNlIHByZWZpbHRlci4gVGhlIGZpbmFsIGdhbWUgaW1hZ2UgaXMgbm90IGJsdXJyZWQuCi8vIEVhY2ggYWNjZXB0ZWQgcmF5IGtlZXBzIHRoZSBleGlzdGluZyBtYXJjaGVyOyBvbmx5IHRoZSBjb2xvdXIgZmV0Y2hlZAovLyBhdCB0aGUgYWNjZXB0ZWQgaGl0IGlzIHJlY29uc3RydWN0ZWQgZnJvbSBhIDUtdGFwIGRlcHRoLWF3YXJlIGNyb3NzLgoKZmxvYXQgY2hpbWVyYV9oaXRfdmlld196X3YxMyh2ZWMyIHV2KSB7CiAgaXZlYzIgZXh0ZW50ID0gbWF4KGNoaW1lcmFfZGVwdGhfZXh0ZW50LCBpdmVjMigxKSk7CiAgdmVjMiB1dl9zYWZlID0gY2xhbXAodXYsIHZlYzIoMC4wKSwgdmVjMigwLjk5OTk5OSkpOwogIGl2ZWMyIGRpc3BsYXlfY29vcmQgPSBjbGFtcCgKICAgIGl2ZWMyKHV2X3NhZmUgKiB2ZWMyKGV4dGVudCkpLAogICAgaXZlYzIoMCksCiAgICBleHRlbnQgLSBpdmVjMigxKSk7CgogIGZsb2F0IGQgPSBjbGFtcCgKICAgIHRleGVsRmV0Y2goCiAgICAgIHNfY2hpbWVyYV9kZXB0aCwKICAgICAgY2hpbWVyYV9kZXB0aF9jb29yZChkaXNwbGF5X2Nvb3JkKSwKICAgICAgMCkuciwKICAgIDEuMGUtOCwKICAgIDEuMCk7CgogIHJldHVybiBjaGltZXJhX2RlcHRoX3RvX3ZpZXdfel92MTIoZCk7Cn0KCmZsb2F0IGNoaW1lcmFfbHVtYV92MTModmVjMyBjKSB7CiAgcmV0dXJuIGRvdChtYXgoYywgdmVjMygwLjApKSwgdmVjMygwLjIxMjYsIDAuNzE1MiwgMC4wNzIyKSk7Cn0KCnZlYzMgY2hpbWVyYV9maWx0ZXJlZF9oaXRfY29sb3VyX3YxMyh2ZWMyIGhpdF91dikgewogIGl2ZWMyIGV4dGVudF9pID0gbWF4KGNoaW1lcmFfZGVwdGhfZXh0ZW50LCBpdmVjMigxKSk7CiAgdmVjMiBleHRlbnQgPSB2ZWMyKGV4dGVudF9pKTsKICB2ZWMyIHBpeGVsID0gMS4wIC8gZXh0ZW50OwoKICB2ZWMyIGNlbnRlcl91diA9IGNsYW1wKAogICAgaGl0X3V2LAogICAgcGl4ZWwgKiAwLjUsCiAgICB2ZWMyKDEuMCkgLSBwaXhlbCAqIDAuNSk7CgogIHZlYzMgY2VudGVyID0gbWF4KGNoaW1lcmFfc291cmNlX2NvbG91cl92MTEoY2VudGVyX3V2KSwgdmVjMygwLjApKTsKICBmbG9hdCBjZW50ZXJfeiA9IGNoaW1lcmFfaGl0X3ZpZXdfel92MTMoY2VudGVyX3V2KTsKICBmbG9hdCBjZW50ZXJfbHVtYSA9IGNoaW1lcmFfbHVtYV92MTMoY2VudGVyKTsKCiAgdmVjMyBzdW0gPSBjZW50ZXIgKiAxLjYwOwogIGZsb2F0IHdlaWdodF9zdW0gPSAxLjYwOwoKICBjb25zdCB2ZWMyIG9mZnNldHNbNF0gPSB2ZWMyWzRdKAogICAgdmVjMiggMS4wLCAgMC4wKSwKICAgIHZlYzIoLTEuMCwgIDAuMCksCiAgICB2ZWMyKCAwLjAsICAxLjApLAogICAgdmVjMiggMC4wLCAtMS4wKSk7CgogIGZvciAoaW50IGkgPSAwOyBpIDwgNDsgaSsrKSB7CiAgICB2ZWMyIHV2ID0gY2xhbXAoCiAgICAgIGNlbnRlcl91diArIG9mZnNldHNbaV0gKiBwaXhlbCwKICAgICAgcGl4ZWwgKiAwLjUsCiAgICAgIHZlYzIoMS4wKSAtIHBpeGVsICogMC41KTsKCiAgICBmbG9hdCB6ID0gY2hpbWVyYV9oaXRfdmlld196X3YxMyh1dik7CiAgICBmbG9hdCByZWxfeiA9IGFicyh6IC0gY2VudGVyX3opIC8gbWF4KGFicyhjZW50ZXJfeiksIDAuMDUpOwogICAgZmxvYXQgZGVwdGhfdyA9IGV4cDIoLXJlbF96ICogNDguMCk7CgogICAgdmVjMyBzYW1wbGVfY29sb3VyID0gbWF4KGNoaW1lcmFfc291cmNlX2NvbG91cl92MTEodXYpLCB2ZWMzKDAuMCkpOwogICAgZmxvYXQgc2FtcGxlX2x1bWEgPSBjaGltZXJhX2x1bWFfdjEzKHNhbXBsZV9jb2xvdXIpOwogICAgZmxvYXQgbHVtYV9kZWx0YSA9IGFicyhzYW1wbGVfbHVtYSAtIGNlbnRlcl9sdW1hKQogICAgICAgICAgICAgICAgICAgICAvIG1heChtYXgoY2VudGVyX2x1bWEsIHNhbXBsZV9sdW1hKSwgMC4xMCk7CiAgICBmbG9hdCBsdW1hX3cgPSBtaXgoMC40MCwgMS4wLCBleHAyKC1sdW1hX2RlbHRhICogNS4wKSk7CgogICAgZmxvYXQgdyA9IDAuNzIgKiBkZXB0aF93ICogbHVtYV93OwogICAgc3VtICs9IHNhbXBsZV9jb2xvdXIgKiB3OwogICAgd2VpZ2h0X3N1bSArPSB3OwogIH0KCiAgdmVjMyBmaWx0ZXJlZCA9IHN1bSAvIG1heCh3ZWlnaHRfc3VtLCAxLjBlLTUpOwogIHJldHVybiBtaXgoY2VudGVyLCBmaWx0ZXJlZCwgMC43Mik7Cn0KCmZsb2F0IGNoaW1lcmFfaWduX3YxMyhpdmVjMiBwKSB7CiAgcmV0dXJuIGZyYWN0KDUyLjk4MjkxODkgKiBmcmFjdCgKICAgIDAuMDY3MTEwNTYgKiBmbG9hdChwLngpICsKICAgIDAuMDA1ODM3MTUgKiBmbG9hdChwLnkpKSk7Cn0KCicnJwpzID0gcy5yZXBsYWNlKGFuY2hvciwgaGVscGVyICsgYW5jaG9yLCAxKQoKb2xkID0gInZlYzMgaGl0X2NvbG91ciA9IGNoaW1lcmFfc291cmNlX2NvbG91cl92MTEoaGl0X3V2KTsiCmlmIG9sZCBub3QgaW4gczoKICAgIHJhaXNlIFN5c3RlbUV4aXQoIlYxMzogaGl0LWNvbG91ciBhY2N1bXVsYXRpb24gYW5jaG9yIG1pc3NpbmciKQpzID0gcy5yZXBsYWNlKAogICAgb2xkLAogICAgInZlYzMgaGl0X2NvbG91ciA9IGNoaW1lcmFfZmlsdGVyZWRfaGl0X2NvbG91cl92MTMoaGl0X3V2KTsiLAogICAgMSkKCmhhc2hfYW5jaG9yID0gImNoaW1lcmFfaGFzaF92MTAxKGRpc3BsYXlfY29vcmQpIgppZiBoYXNoX2FuY2hvciBpbiBzOgogICAgcyA9IHMucmVwbGFjZShoYXNoX2FuY2hvciwgImNoaW1lcmFfaWduX3YxMyhkaXNwbGF5X2Nvb3JkKSIsIDEpCgpwLndyaXRlX3RleHQocywgZW5jb2Rpbmc9InV0Zi04IikKCnByaW50KCJDSElNRVJBIFYxMyBzcGF0aWFsIHJhZGlhbmNlIGRlbm9pc2UgcGF0Y2g6IFBBU1MiKQpwcmludCgiICByZXRhaW5lZCByYXkgbWFyY2hlcjogWUVTIikKcHJpbnQoIiAgZGVwdGgtYXdhcmUgNS10YXAgYWNjZXB0ZWQtaGl0IHJhZGlhbmNlIGZpbHRlcjogWUVTIikKcHJpbnQoIiAgaW50ZXJsZWF2ZWQtZ3JhZGllbnQgcmF5IHJvdGF0aW9uOiBZRVMiKQo=' | base64 -d > /tmp/chimera_v13_patch.py
+          python3 /tmp/chimera_v13_patch.py
+
+          grep -n 'CHIMERA_LIGHTING_V13_SPATIAL_RADIANCE_DENOISE' src/dxvk/shaders/dxvk_present_common.glsl
+          grep -n 'chimera_filtered_hit_colour_v13' src/dxvk/shaders/dxvk_present_common.glsl
+          grep -n 'chimera_ign_v13' src/dxvk/shaders/dxvk_present_common.glsl
+
+      - name: Build DXVK x64 and x32
+        working-directory: dxvk
+        run: |
+          export VERSION_NAME="chimera-dxvk-spatial-denoise-v13"
+          ./package-release.sh "$VERSION_NAME" build --no-package
+
+      - name: Verify and package runtime
+        working-directory: dxvk
+        run: |
+          set -euxo pipefail
+          root="build/dxvk-chimera-dxvk-spatial-denoise-v13"
+          test -f "$root/x64/d3d11.dll"
+          test -f "$root/x64/dxgi.dll"
+          test -f "$root/x32/d3d11.dll"
+          test -f "$root/x32/dxgi.dll"
+
+          grep -q 'CHIMERA_LIGHTING_V13_SPATIAL_RADIANCE_DENOISE' src/dxvk/shaders/dxvk_present_common.glsl
+          grep -q 'chimera_depth_to_view_z_v12' src/dxvk/shaders/dxvk_present_common.glsl
+          grep -q 'chimera_filtered_hit_colour_v13' src/dxvk/shaders/dxvk_present_common.glsl
+
+          mkdir -p ../runtime_bundle
+          cp "$root/x64/d3d11.dll" ../runtime_bundle/d3d11_64.dll
+          cp "$root/x64/dxgi.dll"  ../runtime_bundle/dxgi_64.dll
+          cp "$root/x32/d3d11.dll" ../runtime_bundle/d3d11_32.dll
+          cp "$root/x32/dxgi.dll"  ../runtime_bundle/dxgi_32.dll
+          cp LICENSE ../runtime_bundle/DXVK-LICENSE
+          sha256sum ../runtime_bundle/*.dll
+
+      - name: Upload DXVK runtime
+        uses: actions/upload-artifact@v7
+        with:
+          name: chimera-dxvk-spatial-denoise-v13-runtime
+          path: runtime_bundle
+          compression-level: 0
+          if-no-files-found: error
