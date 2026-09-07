@@ -1,0 +1,122 @@
+name: Chimera DXVK V12.1 Projection Stability FIX
+
+on:
+  push:
+    branches:
+      - chimera-amd-nr
+    paths:
+      - '.github/workflows/chimera_dxvk_projection_stability_v12_1_fix.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-dxvk:
+    name: Build Chimera V12.1 stable exact-depth runtime FIX
+    runs-on: ubuntu-latest
+    container: archlinux/archlinux:base-devel
+
+    steps:
+      - name: Install build dependencies
+        run: pacman -Syu --needed --noconfirm git meson mingw-w64-gcc glslang python python-yaml
+
+      - name: Clone Chimera source and pinned DXVK
+        run: |
+          git clone --branch chimera-amd-nr --single-branch https://github.com/doubledd1403-hue/OptiScaler_DLSSNR.git chimera-source
+          git clone https://github.com/doitsujin/dxvk.git dxvk
+          cd dxvk
+          git checkout d7ac2580aa274a14a500e74edbe4ec6aae250e4a
+          git submodule update --init --recursive
+
+      - name: Reuse proven V1 through V12 FIX4 chain safely
+        run: |
+          python3 - <<'PYIN'
+          import yaml
+          from pathlib import Path
+
+          wf = yaml.safe_load(Path('chimera-source/.github/workflows/chimera_dxvk_exact_depth_v12_fix4.yml').read_text())
+          job = next(iter(wf['jobs'].values()))
+          names = {
+            'base': 'Reuse proven V1 through V11.2 renderer chain',
+            'prepare': 'Prepare corrected V12 patch',
+            'apply': 'Add V12 exact depth reconstruction and diagnostics FIX4',
+          }
+          # These names deliberately avoid /tmp/chimera_* because the inherited
+          # V11.2 scripts use that namespace internally and overwrote V12.1's
+          # prepare script in the first attempt.
+          paths = {
+            'base': Path('/tmp/v12fix4_base_step.sh'),
+            'prepare': Path('/tmp/v12fix4_prepare_step.sh'),
+            'apply': Path('/tmp/v12fix4_apply_step.sh'),
+          }
+          for key, step_name in names.items():
+            step = next(s for s in job['steps'] if s.get('name') == step_name)
+            paths[key].write_text(step['run'])
+          PYIN
+
+          bash /tmp/v12fix4_base_step.sh
+          bash /tmp/v12fix4_prepare_step.sh
+          test -s /tmp/chimera_v12_patch_fixed.py
+          (cd dxvk && bash /tmp/v12fix4_apply_step.sh)
+
+      - name: Apply V12.1 projection-stability patch
+        run: |
+          python3 - <<'PYIN'
+          import yaml
+          from pathlib import Path
+
+          wf = yaml.safe_load(Path('chimera-source/.github/workflows/chimera_dxvk_projection_stability_v12_1.yml').read_text())
+          job = next(iter(wf['jobs'].values()))
+          step = next(s for s in job['steps'] if s.get('name') == 'Add V12.1 atomic projection + last-known-good + hysteresis')
+          Path('/tmp/v12_1_stability_step.sh').write_text(step['run'])
+          PYIN
+          (cd dxvk && bash /tmp/v12_1_stability_step.sh)
+
+      - name: Build DXVK x64 and x32
+        working-directory: dxvk
+        run: |
+          export VERSION_NAME="chimera-dxvk-projection-stability-v12-1-fix"
+          ./package-release.sh "$VERSION_NAME" build --no-package
+
+      - name: Verify and package runtime
+        working-directory: dxvk
+        run: |
+          set -euxo pipefail
+          root="build/dxvk-chimera-dxvk-projection-stability-v12-1-fix"
+          test -f "$root/x64/d3d11.dll"
+          test -f "$root/x64/dxgi.dll"
+          test -f "$root/x32/d3d11.dll"
+          test -f "$root/x32/dxgi.dll"
+
+          python3 - <<'PYIN'
+          from pathlib import Path
+          p = Path('build/dxvk-chimera-dxvk-projection-stability-v12-1-fix/x64/d3d11.dll')
+          data = p.read_bytes()
+          for marker in (
+              b'CHIMERA_DXVK_PROBE_V1',
+              b'CHIMERA_DSV_CREATE_V1',
+              b'CHIMERA_PROJECTION_V8',
+              b'CHIMERA_DEPTH_FOUNDATION_V12',
+              b'CHIMERA_DEPTH_STABILITY_V12_1',
+          ):
+              if marker not in data:
+                  raise SystemExit(f'Missing retained binary marker: {marker!r}')
+          print('V12.1 FIX retained runtime marker verification: PASS')
+          PYIN
+
+          mkdir -p ../runtime_bundle
+          cp "$root/x64/d3d11.dll" ../runtime_bundle/d3d11_64.dll
+          cp "$root/x64/dxgi.dll"  ../runtime_bundle/dxgi_64.dll
+          cp "$root/x32/d3d11.dll" ../runtime_bundle/d3d11_32.dll
+          cp "$root/x32/dxgi.dll"  ../runtime_bundle/dxgi_32.dll
+          cp LICENSE ../runtime_bundle/DXVK-LICENSE
+          sha256sum ../runtime_bundle/*.dll
+
+      - name: Upload DXVK runtime
+        uses: actions/upload-artifact@v7
+        with:
+          name: chimera-dxvk-projection-stability-v12-1-fix-runtime
+          path: runtime_bundle
+          compression-level: 0
+          if-no-files-found: error
