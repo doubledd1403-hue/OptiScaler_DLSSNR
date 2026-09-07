@@ -1,0 +1,100 @@
+name: Chimera DXVK V16 Receiver-Guided GI
+
+on:
+  push:
+    branches:
+      - chimera-amd-nr
+    paths:
+      - '.github/workflows/chimera_dxvk_receiver_guided_gi_v16.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-dxvk:
+    name: Build Chimera V16 receiver-guided GI
+    runs-on: ubuntu-latest
+    container: archlinux/archlinux:base-devel
+
+    steps:
+      - name: Install build dependencies
+        run: pacman -Syu --needed --noconfirm git meson mingw-w64-gcc glslang python python-yaml gzip
+
+      - name: Clone Chimera source and pinned DXVK
+        run: |
+          git clone --branch chimera-amd-nr --single-branch https://github.com/doubledd1403-hue/OptiScaler_DLSSNR.git chimera-source
+          git clone https://github.com/doitsujin/dxvk.git dxvk
+          cd dxvk
+          git checkout d7ac2580aa274a14a500e74edbe4ec6aae250e4a
+          git submodule update --init --recursive
+
+      - name: Reuse complete V15.2 foundation
+        run: |
+          python3 - <<'PYIN'
+          import yaml
+          from pathlib import Path
+
+          wf = yaml.safe_load(
+              Path('chimera-source/.github/workflows/chimera_dxvk_receiver_safe_colour_bleed_v15_2.yml').read_text())
+          job = next(iter(wf['jobs'].values()))
+
+          for step_name, out_path in [
+              ('Reuse complete V15.1 foundation', '/tmp/v16_inherit_v151.sh'),
+              ('Add V15.2 receiver-safe shadows and wide colour bleed', '/tmp/v16_inherit_v152.sh'),
+          ]:
+              step = next(s for s in job['steps'] if s.get('name') == step_name)
+              Path(out_path).write_text(step['run'])
+          PYIN
+
+          bash /tmp/v16_inherit_v151.sh
+          (
+            cd dxvk
+            bash /tmp/v16_inherit_v152.sh
+          )
+
+          grep -q 'CHIMERA_LIGHTING_V15_TEMPORAL_HISTORY' dxvk/src/dxvk/shaders/dxvk_present_common.glsl
+          grep -q 'CHIMERA_LIGHTING_V15_2_RECEIVER_SAFE_COLOUR_BLEED' dxvk/src/dxvk/shaders/dxvk_present_common.glsl
+
+      - name: Add V16 receiver-guided GI and fast temporal response
+        working-directory: dxvk
+        run: |
+          echo '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' | base64 -d | gzip -d > /tmp/chimera_v16_patch.py
+          python3 /tmp/chimera_v16_patch.py
+          grep -n 'CHIMERA_LIGHTING_V16_RECEIVER_GUIDED_GI' src/dxvk/shaders/dxvk_present_common.glsl
+          grep -n 'chimera_receiver_plane_support_v16' src/dxvk/shaders/dxvk_present_common.glsl
+          grep -n 'diffuse_energy' src/dxvk/shaders/dxvk_present_common.glsl
+
+      - name: Build DXVK x64 and x32
+        working-directory: dxvk
+        run: |
+          export VERSION_NAME="chimera-dxvk-receiver-guided-gi-v16"
+          ./package-release.sh "$VERSION_NAME" build --no-package
+
+      - name: Verify and package runtime
+        working-directory: dxvk
+        run: |
+          set -euxo pipefail
+          root="build/dxvk-chimera-dxvk-receiver-guided-gi-v16"
+          test -f "$root/x64/d3d11.dll"
+          test -f "$root/x64/dxgi.dll"
+          test -f "$root/x32/d3d11.dll"
+          test -f "$root/x32/dxgi.dll"
+          grep -q 'CHIMERA_LIGHTING_V16_RECEIVER_GUIDED_GI' src/dxvk/shaders/dxvk_present_common.glsl
+          grep -q 'chimera_receiver_plane_support_v16' src/dxvk/shaders/dxvk_present_common.glsl
+          grep -q 'source_chroma' src/dxvk/shaders/dxvk_present_common.glsl
+          mkdir -p ../runtime_bundle
+          cp "$root/x64/d3d11.dll" ../runtime_bundle/d3d11_64.dll
+          cp "$root/x64/dxgi.dll"  ../runtime_bundle/dxgi_64.dll
+          cp "$root/x32/d3d11.dll" ../runtime_bundle/d3d11_32.dll
+          cp "$root/x32/dxgi.dll"  ../runtime_bundle/dxgi_32.dll
+          cp LICENSE ../runtime_bundle/DXVK-LICENSE
+          sha256sum ../runtime_bundle/*.dll
+
+      - name: Upload DXVK runtime
+        uses: actions/upload-artifact@v7
+        with:
+          name: chimera-dxvk-receiver-guided-gi-v16-runtime
+          path: runtime_bundle
+          compression-level: 0
+          if-no-files-found: error
