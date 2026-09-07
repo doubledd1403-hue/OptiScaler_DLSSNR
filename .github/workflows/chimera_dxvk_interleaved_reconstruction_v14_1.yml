@@ -1,0 +1,105 @@
+name: Chimera DXVK V14.1 Interleaved Reconstruction
+
+on:
+  push:
+    branches:
+      - chimera-amd-nr
+    paths:
+      - '.github/workflows/chimera_dxvk_interleaved_reconstruction_v14_1.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-dxvk:
+    name: Build Chimera V14.1 interleaved reconstruction
+    runs-on: ubuntu-latest
+    container: archlinux/archlinux:base-devel
+
+    steps:
+      - name: Install build dependencies
+        run: pacman -Syu --needed --noconfirm git meson mingw-w64-gcc glslang python python-yaml
+
+      - name: Clone Chimera source and pinned DXVK
+        run: |
+          git clone --branch chimera-amd-nr --single-branch https://github.com/doubledd1403-hue/OptiScaler_DLSSNR.git chimera-source
+          git clone https://github.com/doitsujin/dxvk.git dxvk
+          cd dxvk
+          git checkout d7ac2580aa274a14a500e74edbe4ec6aae250e4a
+          git submodule update --init --recursive
+
+      - name: Reuse proven V1 through V13.1 chain
+        run: |
+          python3 - <<'PYIN'
+          import yaml
+          from pathlib import Path
+
+          wf = yaml.safe_load(
+              Path('chimera-source/.github/workflows/chimera_dxvk_reconstruction_shadows_v13_1.yml').read_text())
+          job = next(iter(wf['jobs'].values()))
+
+          steps = [
+            ('Reuse proven V1 through V13 chain', '/tmp/v141_inherit_v13.sh'),
+            ('Add V13.1 reconstruction and contact-shadow foundation', '/tmp/v141_inherit_v131.sh'),
+          ]
+
+          for step_name, out_path in steps:
+              step = next(s for s in job['steps'] if s.get('name') == step_name)
+              Path(out_path).write_text(step['run'])
+          PYIN
+
+          bash /tmp/v141_inherit_v13.sh
+          (
+            cd dxvk
+            bash /tmp/v141_inherit_v131.sh
+          )
+
+          grep -q 'CHIMERA_DEPTH_STABILITY_V12_1' dxvk/src/d3d11/d3d11_context.cpp
+          grep -q 'CHIMERA_LIGHTING_V13_1_RECON_SHADOWS' dxvk/src/dxvk/shaders/dxvk_present_common.glsl
+
+      - name: Add V14.1 interleaved reconstruction field
+        working-directory: dxvk
+        run: |
+          echo 'CmZyb20gcGF0aGxpYiBpbXBvcnQgUGF0aAoKcCA9IFBhdGgoInNyYy9keHZrL3NoYWRlcnMvZHh2a19wcmVzZW50X2NvbW1vbi5nbHNsIikKcyA9IHAucmVhZF90ZXh0KGVuY29kaW5nPSJ1dGYtOCIpCgpyZXF1aXJlZCA9IFsKICAgICJDSElNRVJBX0xJR0hUSU5HX1YxM18xX1JFQ09OX1NIQURPV1MiLAogICAgImNoaW1lcmFfdHJhY2VfcmFkaWFuY2VfdjExIiwKICAgICJjaGltZXJhX2ZpbHRlcmVkX2hpdF9jb2xvdXJfdjEzIiwKICAgICJjaGltZXJhX2NvbnRhY3Rfc2hhZG93X3YxMzEiLAogICAgImNoaW1lcmFfZGVwdGhfdG9fdmlld196X3YxMiIsCiAgICAiY2hpbWVyYV9kZXB0aF9ub3JtYWwiLAogICAgImNoaW1lcmFfdmlld19wb3MiLApdCmZvciB0b2tlbiBpbiByZXF1aXJlZDoKICAgIGlmIHRva2VuIG5vdCBpbiBzOgogICAgICAgIHJhaXNlIFN5c3RlbUV4aXQoZiJWMTQuMTogaW5oZXJpdGVkIHRva2VuIG1pc3Npbmc6IHt0b2tlbn0iKQoKbWFya2VyID0gIi8vIENISU1FUkFfTElHSFRJTkdfVjE0XzFfSU5URVJMRUFWRURfUkVDT05TVFJVQ1RJT04iCmlmIG1hcmtlciBpbiBzOgogICAgcmFpc2UgU3lzdGVtRXhpdCgiVjE0LjE6IG1hcmtlciBhbHJlYWR5IHByZXNlbnQiKQoKc3RhcnQgPSBzLmZpbmQoInZlYzQgY2hpbWVyYV9hcHBseV9saWdodGluZ192MTEodmVjNCBjb2xvciwgaXZlYzIgZGlzcGxheV9jb29yZCkgeyIpCmlmIHN0YXJ0IDwgMDoKICAgIHJhaXNlIFN5c3RlbUV4aXQoIlYxNC4xOiBsaWdodGluZyBmdW5jdGlvbiBzdGFydCBtaXNzaW5nIikKCmJyYWNlID0gcy5maW5kKCJ7Iiwgc3RhcnQpCmRlcHRoID0gMAplbmQgPSBOb25lCmZvciBpIGluIHJhbmdlKGJyYWNlLCBsZW4ocykpOgogICAgaWYgc1tpXSA9PSAieyI6CiAgICAgICAgZGVwdGggKz0gMQogICAgZWxpZiBzW2ldID09ICJ9IjoKICAgICAgICBkZXB0aCAtPSAxCiAgICAgICAgaWYgZGVwdGggPT0gMDoKICAgICAgICAgICAgZW5kID0gaSArIDEKICAgICAgICAgICAgYnJlYWsKCmlmIGVuZCBpcyBOb25lOgogICAgcmFpc2UgU3lzdGVtRXhpdCgiVjE0LjE6IGxpZ2h0aW5nIGZ1bmN0aW9uIGVuZCBtaXNzaW5nIikKCnJlcGxhY2VtZW50ID0gcicnJy8vIENISU1FUkFfTElHSFRJTkdfVjE0XzFfSU5URVJMRUFWRURfUkVDT05TVFJVQ1RJT04KLy8KLy8gQXJjaGl0ZWN0dXJlIHBpdm90OgovLyAtIGtlZXAgdGhlIHByb3ZlbiBWMTMuMSBkZXB0aC9wcm9qZWN0aW9uL3RyYWNlciBmb3VuZGF0aW9uCi8vIC0gc3RvcCBmaXJpbmcgZm91ciByYXlzIGZyb20gb25lIHBpeGVsCi8vIC0gdHJlYXQgYSAyeDIgaW50ZXJsZWF2ZWQgZ3JpZCBhcyBhIHZpcnR1YWwgaGFsZi1yZXNvbHV0aW9uIGxpZ2h0aW5nIGZpZWxkCi8vIC0gcmVjb25zdHJ1Y3QgZm91ciBuZWlnaGJvdXJpbmcgbG93LXJlc29sdXRpb24gc2FtcGxlcyBiaWxpbmVhcmx5Ci8vIC0gcmVqZWN0IGNyb3NzLXN1cmZhY2UgcmV1c2UgdXNpbmcgZXhhY3QgZGVwdGggKyBkZXB0aCBub3JtYWxzCi8vCi8vIFRoaXMgZGVsaWJlcmF0ZWx5IGF2b2lkcyBhIHBlcnNpc3RlbnQgaGlzdG9yeS9pbWFnZSBidWZmZXIgaW4gdGhlIGZpcnN0Ci8vIHJlY29uc3RydWN0aW9uIHByb29mLiBJdCB2YWxpZGF0ZXMgdGhlIHNwYXRpYWwtcmV1c2UgaWRlYSBhdCBhYm91dCB0aGUgb2xkCi8vIDQtcmF5IHRyYWNlIGNvdW50IGJlZm9yZSB0aGUgbW9yZSBpbnZhc2l2ZSBwZXJzaXN0ZW50LWJ1ZmZlciBpbXBsZW1lbnRhdGlvbi4KCmZsb2F0IGNoaW1lcmFfYmlsaW5lYXJfd2VpZ2h0X3YxNDEodmVjMiBmLCBpdmVjMiBvKSB7CiAgdmVjMiB3ID0gbyA9PSBpdmVjMigwLCAwKQogICAgPyB2ZWMyKDEuMCAtIGYueCwgMS4wIC0gZi55KQogICAgOiAobyA9PSBpdmVjMigxLCAwKQogICAgICA/IHZlYzIoZi54LCAxLjAgLSBmLnkpCiAgICAgIDogKG8gPT0gaXZlYzIoMCwgMSkKICAgICAgICA/IHZlYzIoMS4wIC0gZi54LCBmLnkpCiAgICAgICAgOiB2ZWMyKGYueCwgZi55KSkpOwogIHJldHVybiB3LnggKiB3Lnk7Cn0KCmJvb2wgY2hpbWVyYV9pbnRlcmxlYXZlZF9zYW1wbGVfdjE0MSgKICBpdmVjMiBzYW1wbGVfY29vcmQsCiAgaXZlYzIgY2VsbF9jb29yZCwKICBvdXQgdmVjMyBzYW1wbGVfcmFkaWFuY2UsCiAgb3V0IGZsb2F0IHNhbXBsZV9oaXRfd2VpZ2h0LAogIG91dCBmbG9hdCBzYW1wbGVfeiwKICBvdXQgdmVjMyBzYW1wbGVfbikgewoKICBzYW1wbGVfcmFkaWFuY2UgPSB2ZWMzKDAuMCk7CiAgc2FtcGxlX2hpdF93ZWlnaHQgPSAwLjA7CgogIGZsb2F0IGQgPSBjaGltZXJhX2RlcHRoX3JhdyhzYW1wbGVfY29vcmQpOwogIGlmIChkIDw9IDEuMGUtNSkgewogICAgc2FtcGxlX3ogPSAwLjA7CiAgICBzYW1wbGVfbiA9IHZlYzMoMC4wLCAwLjAsIDEuMCk7CiAgICByZXR1cm4gZmFsc2U7CiAgfQoKICB2ZWMzIHAgPSBjaGltZXJhX3ZpZXdfcG9zKHNhbXBsZV9jb29yZCwgZCk7CiAgdmVjMyBuID0gY2hpbWVyYV9kZXB0aF9ub3JtYWwoc2FtcGxlX2Nvb3JkKTsKCiAgdmVjMyB0b19jYW1lcmEgPSBub3JtYWxpemUoLXApOwogIGlmIChkb3QobiwgdG9fY2FtZXJhKSA8IDAuMCkKICAgIG4gPSAtbjsKCiAgc2FtcGxlX3ogPSBjaGltZXJhX2RlcHRoX3RvX3ZpZXdfel92MTIoZCk7CiAgc2FtcGxlX24gPSBub3JtYWxpemUobik7CgogIHZlYzMgcmVmX2F4aXMgPSBhYnMobi56KSA8IDAuOTUKICAgID8gdmVjMygwLjAsIDAuMCwgMS4wKQogICAgOiB2ZWMzKDAuMCwgMS4wLCAwLjApOwogIHZlYzMgdCA9IG5vcm1hbGl6ZShjcm9zcyhyZWZfYXhpcywgbikpOwogIHZlYzMgYiA9IG5vcm1hbGl6ZShjcm9zcyhuLCB0KSk7CgogIHVpbnQgcGhhc2UgPSB1aW50KChjZWxsX2Nvb3JkLnggJiAxKSB8ICgoY2VsbF9jb29yZC55ICYgMSkgPDwgMSkpOwogIGZsb2F0IHUgPSAoZmxvYXQocGhhc2UpICsgMC41KSAqIDAuMjU7CiAgZmxvYXQgYmFzZV9hbmdsZSA9CiAgICA2LjI4MzE4NTMwNzE4ICogY2hpbWVyYV9pZ25fdjEzKGNlbGxfY29vcmQgKiAxNyArIGl2ZWMyKDExLCAyOSkpOwogIGZsb2F0IHBoaSA9IGJhc2VfYW5nbGUgKyBmbG9hdChwaGFzZSkgKiAyLjM5OTk2MzIyOTczOwoKICBmbG9hdCB0YW5nZW50X21hZyA9IG1peCgwLjQ2LCAwLjg0LCB1KTsKICBmbG9hdCBub3JtYWxfbWFnID0gc3FydChtYXgoCiAgICAxLjAgLSB0YW5nZW50X21hZyAqIHRhbmdlbnRfbWFnLAogICAgMC4wNSkpOwoKICB2ZWMzIHRhbmdlbnRfZGlyID0gdCAqIGNvcyhwaGkpICsgYiAqIHNpbihwaGkpOwogIHZlYzMgZGlyID0gbm9ybWFsaXplKAogICAgbiAqIG5vcm1hbF9tYWcgKyB0YW5nZW50X2RpciAqIHRhbmdlbnRfbWFnKTsKCiAgdmVjMyBvcmlnaW4gPSBwICsgbiAqIG1heChhYnMocC56KSAqIDAuMDA2MCwgMC4wMTApOwoKICB2ZWMyIGhpdF91djsKICBmbG9hdCB3ID0gY2hpbWVyYV90cmFjZV9yYWRpYW5jZV92MTEob3JpZ2luLCBkaXIsIGhpdF91dik7CiAgaWYgKHcgPD0gMC4wKQogICAgcmV0dXJuIHRydWU7CgogIHNhbXBsZV9yYWRpYW5jZSA9IG1heCgKICAgIGNoaW1lcmFfZmlsdGVyZWRfaGl0X2NvbG91cl92MTMoaGl0X3V2KSwKICAgIHZlYzMoMC4wKSk7CiAgc2FtcGxlX2hpdF93ZWlnaHQgPSB3OwogIHJldHVybiB0cnVlOwp9Cgp2ZWM0IGNoaW1lcmFfYXBwbHlfbGlnaHRpbmdfdjExKHZlYzQgY29sb3IsIGl2ZWMyIGRpc3BsYXlfY29vcmQpIHsKICBmbG9hdCB1c2VyX3N0cmVuZ3RoID0gY2xhbXAoY2hpbWVyYV9pbnRlbnNpdHksIDAuMCwgMS4wKTsKCiAgaWYgKGNoaW1lcmFfZW5hYmxlZCA9PSAwdSB8fAogICAgICBjaGltZXJhX2RlcHRoX2V4dGVudC54IDw9IDAgfHwKICAgICAgY2hpbWVyYV9kZXB0aF9leHRlbnQueSA8PSAwIHx8CiAgICAgIHVzZXJfc3RyZW5ndGggPD0gMC4wMDEpCiAgICByZXR1cm4gY29sb3I7CgogIGl2ZWMyIGV4dGVudCA9IG1heChjaGltZXJhX2RlcHRoX2V4dGVudCwgaXZlYzIoMSkpOwogIGl2ZWMyIHAwID0gY2xhbXAoZGlzcGxheV9jb29yZCwgaXZlYzIoMCksIGV4dGVudCAtIGl2ZWMyKDEpKTsKCiAgZmxvYXQgZDAgPSBjaGltZXJhX2RlcHRoX3JhdyhwMCk7CiAgaWYgKGQwIDw9IDEuMGUtNSkKICAgIHJldHVybiBjb2xvcjsKCiAgZmxvYXQgejAgPSBjaGltZXJhX2RlcHRoX3RvX3ZpZXdfel92MTIoZDApOwogIHZlYzMgbjAgPSBub3JtYWxpemUoY2hpbWVyYV9kZXB0aF9ub3JtYWwocDApKTsKCiAgdmVjMiBsb3dfcG9zID0gKHZlYzIocDApICsgdmVjMigwLjUpKSAqIDAuNSAtIHZlYzIoMC41KTsKICBpdmVjMiBjZWxsMCA9IGl2ZWMyKGZsb29yKGxvd19wb3MpKTsKICB2ZWMyIGZyYWNfY2VsbCA9IGZyYWN0KGxvd19wb3MpOwoKICBjb25zdCBpdmVjMiBvZmZzZXRzWzRdID0gaXZlYzJbNF0oCiAgICBpdmVjMigwLCAwKSwKICAgIGl2ZWMyKDEsIDApLAogICAgaXZlYzIoMCwgMSksCiAgICBpdmVjMigxLCAxKSk7CgogIHZlYzMgcmFkaWFuY2Vfc3VtID0gdmVjMygwLjApOwogIGZsb2F0IHJhZGlhbmNlX3dlaWdodF9zdW0gPSAwLjA7CiAgZmxvYXQgZ2VvbWV0cnlfd2VpZ2h0X3N1bSA9IDAuMDsKICBmbG9hdCBoaXRfcHJlc2VuY2Vfc3VtID0gMC4wOwoKICBmb3IgKGludCBpID0gMDsgaSA8IDQ7IGkrKykgewogICAgaXZlYzIgY2VsbCA9IG1heChjZWxsMCArIG9mZnNldHNbaV0sIGl2ZWMyKDApKTsKCiAgICBpbnQgcGhhc2UgPSAoY2VsbC54ICYgMSkgfCAoKGNlbGwueSAmIDEpIDw8IDEpOwogICAgaXZlYzIgaW50cmEgPSBpdmVjMihwaGFzZSAmIDEsIChwaGFzZSA+PiAxKSAmIDEpOwogICAgaXZlYzIgc2FtcGxlX2Nvb3JkID0gY2xhbXAoCiAgICAgIGNlbGwgKiAyICsgaW50cmEsCiAgICAgIGl2ZWMyKDApLAogICAgICBleHRlbnQgLSBpdmVjMigxKSk7CgogICAgdmVjMyBzYW1wbGVfcmFkaWFuY2U7CiAgICBmbG9hdCBzYW1wbGVfaGl0X3dlaWdodDsKICAgIGZsb2F0IHNhbXBsZV96OwogICAgdmVjMyBzYW1wbGVfbjsKCiAgICBib29sIHZhbGlkID0gY2hpbWVyYV9pbnRlcmxlYXZlZF9zYW1wbGVfdjE0MSgKICAgICAgc2FtcGxlX2Nvb3JkLAogICAgICBjZWxsLAogICAgICBzYW1wbGVfcmFkaWFuY2UsCiAgICAgIHNhbXBsZV9oaXRfd2VpZ2h0LAogICAgICBzYW1wbGVfeiwKICAgICAgc2FtcGxlX24pOwoKICAgIGlmICghdmFsaWQpCiAgICAgIGNvbnRpbnVlOwoKICAgIGZsb2F0IGJpbGluZWFyX3cgPSBjaGltZXJhX2JpbGluZWFyX3dlaWdodF92MTQxKAogICAgICBmcmFjX2NlbGwsCiAgICAgIG9mZnNldHNbaV0pOwoKICAgIGZsb2F0IHJlbF96ID0gYWJzKHNhbXBsZV96IC0gejApIC8gbWF4KGFicyh6MCksIDAuMDUpOwogICAgZmxvYXQgZGVwdGhfdyA9IGV4cDIoLXJlbF96ICogNjQuMCk7CgogICAgZmxvYXQgbmQgPSBjbGFtcChkb3QobjAsIHNhbXBsZV9uKSwgMC4wLCAxLjApOwogICAgZmxvYXQgbm9ybWFsX3cgPSBzbW9vdGhzdGVwKDAuMzAsIDAuOTIsIG5kKTsKCiAgICBmbG9hdCByZXVzZV93ID0gYmlsaW5lYXJfdyAqIGRlcHRoX3cgKiBub3JtYWxfdzsKICAgIGdlb21ldHJ5X3dlaWdodF9zdW0gKz0gcmV1c2VfdzsKCiAgICBpZiAoc2FtcGxlX2hpdF93ZWlnaHQgPiAwLjApIHsKICAgICAgZmxvYXQgaGl0X3cgPSByZXVzZV93ICogc2FtcGxlX2hpdF93ZWlnaHQ7CiAgICAgIHJhZGlhbmNlX3N1bSArPSBzYW1wbGVfcmFkaWFuY2UgKiBoaXRfdzsKICAgICAgcmFkaWFuY2Vfd2VpZ2h0X3N1bSArPSBoaXRfdzsKICAgICAgaGl0X3ByZXNlbmNlX3N1bSArPSByZXVzZV93OwogICAgfQogIH0KCiAgdmVjMyByZWNvbnN0cnVjdGVkX3JhZGlhbmNlID0gdmVjMygwLjApOwogIGlmIChyYWRpYW5jZV93ZWlnaHRfc3VtID4gMS4wZS01KQogICAgcmVjb25zdHJ1Y3RlZF9yYWRpYW5jZSA9CiAgICAgIHJhZGlhbmNlX3N1bSAvIHJhZGlhbmNlX3dlaWdodF9zdW07CgogIGZsb2F0IHJlY29uc3RydWN0ZWRfY292ZXJhZ2UgPQogICAgZ2VvbWV0cnlfd2VpZ2h0X3N1bSA+IDEuMGUtNQogICAgICA/IGNsYW1wKGhpdF9wcmVzZW5jZV9zdW0gLyBnZW9tZXRyeV93ZWlnaHRfc3VtLCAwLjAsIDEuMCkKICAgICAgOiAwLjA7CgogIGlmIChjaGltZXJhX2RlYnVnX21vZGUgPT0gMXUpCiAgICByZXR1cm4gdmVjNCh2ZWMzKHJlY29uc3RydWN0ZWRfY292ZXJhZ2UpLCAxLjApOwoKICBpZiAoY2hpbWVyYV9kZWJ1Z19tb2RlID09IDJ1KQogICAgcmV0dXJuIHZlYzQoCiAgICAgIGNsYW1wKHJlY29uc3RydWN0ZWRfcmFkaWFuY2UsIHZlYzMoMC4wKSwgdmVjMygxLjApKSwKICAgICAgMS4wKTsKCiAgZmxvYXQgY29udGFjdF9hbyA9IGNoaW1lcmFfY29udGFjdF9zaGFkb3dfdjEzMShwMCk7CiAgZmxvYXQgcmF5X2FvID0gc21vb3Roc3RlcCgwLjEyLCAwLjcyLCByZWNvbnN0cnVjdGVkX2NvdmVyYWdlKTsKICBmbG9hdCBhbyA9IGNsYW1wKAogICAgY29udGFjdF9hbyAqIDAuODIgKyByYXlfYW8gKiAwLjIyLAogICAgMC4wLAogICAgMS4wKTsKCiAgZmxvYXQgc2hhZG93X2Ftb3VudCA9IGNsYW1wKAogICAgdXNlcl9zdHJlbmd0aCAqIDAuMTYgKiBhbywKICAgIDAuMCwKICAgIDAuMjIpOwogIGNvbG9yLnJnYiAqPSAxLjAgLSBzaGFkb3dfYW1vdW50OwoKICBpZiAocmFkaWFuY2Vfd2VpZ2h0X3N1bSA+IDEuMGUtNSkgewogICAgZmxvYXQgY29uZmlkZW5jZSA9IHNtb290aHN0ZXAoCiAgICAgIDAuMDUsCiAgICAgIDAuNjIsCiAgICAgIHJlY29uc3RydWN0ZWRfY292ZXJhZ2UpOwoKICAgIGZsb2F0IGx1bWEgPSBjaGltZXJhX2x1bWFfdjEzKHJlY29uc3RydWN0ZWRfcmFkaWFuY2UpOwogICAgdmVjMyBib3VuY2VfY29sb3VyID0gbWF4KAogICAgICBtaXgodmVjMyhsdW1hKSwgcmVjb25zdHJ1Y3RlZF9yYWRpYW5jZSwgMS4wOCksCiAgICAgIHZlYzMoMC4wKSk7CgogICAgdmVjMyBib3VuY2UgPSBtaW4oCiAgICAgIGJvdW5jZV9jb2xvdXIgKgogICAgICAgICgwLjU4ICogY29uZmlkZW5jZSAqIHVzZXJfc3RyZW5ndGgpLAogICAgICB2ZWMzKDAuNzIpKTsKCiAgICBjb2xvci5yZ2IgKz0gYm91bmNlOwogIH0KCiAgcmV0dXJuIGNvbG9yOwp9JycnCgpzID0gc1s6c3RhcnRdICsgcmVwbGFjZW1lbnQgKyBzW2VuZDpdCnAud3JpdGVfdGV4dChzLCBlbmNvZGluZz0idXRmLTgiKQoKY2hlY2sgPSBwLnJlYWRfdGV4dChlbmNvZGluZz0idXRmLTgiKQpmb3IgdG9rZW4gaW4gWwogICAgIkNISU1FUkFfTElHSFRJTkdfVjE0XzFfSU5URVJMRUFWRURfUkVDT05TVFJVQ1RJT04iLAogICAgImNoaW1lcmFfaW50ZXJsZWF2ZWRfc2FtcGxlX3YxNDEiLAogICAgInJlY29uc3RydWN0ZWRfcmFkaWFuY2UiLAogICAgInJlY29uc3RydWN0ZWRfY292ZXJhZ2UiLAogICAgImdlb21ldHJ5X3dlaWdodF9zdW0iLApdOgogICAgaWYgdG9rZW4gbm90IGluIGNoZWNrOgogICAgICAgIHJhaXNlIFN5c3RlbUV4aXQoZiJWMTQuMTogdmVyaWZpY2F0aW9uIHRva2VuIG1pc3Npbmc6IHt0b2tlbn0iKQoKcHJpbnQoIkNISU1FUkEgVjE0LjEgaW50ZXJsZWF2ZWQgc3BhdGlhbCByZWNvbnN0cnVjdGlvbiBwYXRjaDogUEFTUyIpCnByaW50KCIgIGluaGVyaXRlZCBWMTMuMSB0cmFjZXIvZGVwdGggZm91bmRhdGlvbjogWUVTIikKcHJpbnQoIiAgdmlydHVhbCBoYWxmLXJlc29sdXRpb24gMngyIGxpZ2h0aW5nIGZpZWxkOiBZRVMiKQpwcmludCgiICBmb3VyIHNwYXRpYWwgcmF5IHNhbXBsZXMgcGVyIG91dHB1dCBwaXhlbDogWUVTIikKcHJpbnQoIiAgZGVwdGgvbm9ybWFsIGJpbGF0ZXJhbCByZWNvbnN0cnVjdGlvbjogWUVTIikKcHJpbnQoIiAgY29udGFjdCBzaGFkb3cgc2VwYXJhdGVkIGZyb20gY29sb3VyIEdJOiBZRVMiKQo=' | base64 -d > /tmp/chimera_v14_1_patch.py
+          python3 /tmp/chimera_v14_1_patch.py
+
+          grep -n 'CHIMERA_LIGHTING_V14_1_INTERLEAVED_RECONSTRUCTION' src/dxvk/shaders/dxvk_present_common.glsl
+          grep -n 'chimera_interleaved_sample_v141' src/dxvk/shaders/dxvk_present_common.glsl
+          grep -n 'reconstructed_radiance' src/dxvk/shaders/dxvk_present_common.glsl
+
+      - name: Build DXVK x64 and x32
+        working-directory: dxvk
+        run: |
+          export VERSION_NAME="chimera-dxvk-interleaved-reconstruction-v14-1"
+          ./package-release.sh "$VERSION_NAME" build --no-package
+
+      - name: Verify and package runtime
+        working-directory: dxvk
+        run: |
+          set -euxo pipefail
+          root="build/dxvk-chimera-dxvk-interleaved-reconstruction-v14-1"
+          test -f "$root/x64/d3d11.dll"
+          test -f "$root/x64/dxgi.dll"
+          test -f "$root/x32/d3d11.dll"
+          test -f "$root/x32/dxgi.dll"
+
+          grep -q 'CHIMERA_LIGHTING_V14_1_INTERLEAVED_RECONSTRUCTION' src/dxvk/shaders/dxvk_present_common.glsl
+          grep -q 'geometry_weight_sum' src/dxvk/shaders/dxvk_present_common.glsl
+          grep -q 'CHIMERA_LIGHTING_V13_1_RECON_SHADOWS' src/dxvk/shaders/dxvk_present_common.glsl
+
+          mkdir -p ../runtime_bundle
+          cp "$root/x64/d3d11.dll" ../runtime_bundle/d3d11_64.dll
+          cp "$root/x64/dxgi.dll"  ../runtime_bundle/dxgi_64.dll
+          cp "$root/x32/d3d11.dll" ../runtime_bundle/d3d11_32.dll
+          cp "$root/x32/dxgi.dll"  ../runtime_bundle/dxgi_32.dll
+          cp LICENSE ../runtime_bundle/DXVK-LICENSE
+          sha256sum ../runtime_bundle/*.dll
+
+      - name: Upload DXVK runtime
+        uses: actions/upload-artifact@v7
+        with:
+          name: chimera-dxvk-interleaved-reconstruction-v14-1-runtime
+          path: runtime_bundle
+          compression-level: 0
+          if-no-files-found: error
