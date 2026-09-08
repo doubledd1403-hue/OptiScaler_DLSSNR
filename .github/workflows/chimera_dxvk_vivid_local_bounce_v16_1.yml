@@ -1,0 +1,88 @@
+name: Chimera DXVK V16.1 Vivid Local Bounce
+
+on:
+  push:
+    branches:
+      - chimera-amd-nr
+    paths:
+      - '.github/workflows/chimera_dxvk_vivid_local_bounce_v16_1.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-dxvk:
+    name: Build Chimera V16.1 vivid local bounce
+    runs-on: ubuntu-latest
+    container: archlinux/archlinux:base-devel
+
+    steps:
+      - name: Install build dependencies
+        run: pacman -Syu --needed --noconfirm git meson mingw-w64-gcc glslang python python-yaml gzip
+
+      - name: Clone Chimera source and pinned DXVK
+        run: |
+          git clone --branch chimera-amd-nr --single-branch https://github.com/doubledd1403-hue/OptiScaler_DLSSNR.git chimera-source
+          git clone https://github.com/doitsujin/dxvk.git dxvk
+          cd dxvk
+          git checkout d7ac2580aa274a14a500e74edbe4ec6aae250e4a
+          git submodule update --init --recursive
+
+      - name: Reuse complete V16 foundation
+        run: |
+          python3 - <<'PYIN'
+          import yaml
+          from pathlib import Path
+          wf = yaml.safe_load(
+              Path('chimera-source/.github/workflows/chimera_dxvk_receiver_guided_gi_v16.yml').read_text())
+          job = next(iter(wf['jobs'].values()))
+          for step_name, out_path in [
+              ('Reuse complete V15.2 foundation', '/tmp/v161_inherit_v152.sh'),
+              ('Add V16 receiver-guided GI and fast temporal response', '/tmp/v161_inherit_v16.sh'),
+          ]:
+              step = next(s for s in job['steps'] if s.get('name') == step_name)
+              Path(out_path).write_text(step['run'])
+          PYIN
+          bash /tmp/v161_inherit_v152.sh
+          (cd dxvk && bash /tmp/v161_inherit_v16.sh)
+          grep -q 'CHIMERA_LIGHTING_V16_RECEIVER_GUIDED_GI' dxvk/src/dxvk/shaders/dxvk_present_common.glsl
+
+      - name: Add V16.1 vivid local bounce
+        working-directory: dxvk
+        run: |
+          echo 'H4sIAPU9n2oC/7VWTVPjOBC9+1d05YLDBkNCwqSYyYGFFJMq5qNgh8vulkrY7ViFLXklOQm1s/99W/6AhBgyTO36kNhS93vq1pO6vVirDHJuk1TcgchypS18pU/Py2FSvvkdo8PDaLW4PzQJj1Cb8oPlGg1Ky0KVZUoG89Skna5nyCsPNPKIWVxZH2WoIiHnk05h44MxWXga/yqExogsf/eAns75x9mn6fUZu5pdfvxt9vmS3fZP2PX0fDq7nV6zy2+zi+kFu5x1epV5mIgMNWcaQxQL1CxPuURmitwtny36J42lUYUOkYUJRcmbwUjEcWGQoUQ9f2hGCUxJY3URWoyY0JpHgssQaf5PL1YarLpHCUJCs/7T0lHE9YxU1s2aatg9mguDcPNgLGbTlbB+3KHAgv4p2SWoBREBDdT+mTCGEnUKf5ff/7hUEXh7cvrsdnY7u2BXX87PrtivX759Pp921ui3qBvmjOt71MBTt0UPUG9itS15aso98b29vb0yMv8xxXVy4QMcBYNxtyJBW2hJA0fvyaG3w6vf6uV1e+t8S1Nk8GEC/eAID0bw/TuoMEwLUh1bKIuGkAY7yH8Aor9jJXGquAWnB5SmoKSU5iZTyiaU0dwn7B4M3U9p6m8ydLtrS9qJdRSMenAcDF7D2lrbpoZr0DDlWe7X8vNr7adFxuHABTkcdWGfXoYnvdqGBp9ej4fby/4ZmuOa5t2glWY0eB5Rc9Jq+EzIBtxqLo0TEB2UfVg2IAsMjyltJ4ONRP8szHi8lWM3Ay9dCI/4qwZf4pIlwlilHxrspYjw+RjFPnb8boqgY/onuPUQ/i/ed8MXeLd05W54tWQ8U4W0dBms7TXpgA601SjnNil3eDCgv9ojFphGFePjdjuLbU29jWI02skxGj2PBeCOwCll+xMXvcv6c+inRLyvRK1SpQM9v4NfJqV2KoReo5LhptjWGegyGPwHDI2cXRxVxVEUrdvkqujQ7fxYcWjmR+pNc+njKkenJqgKOJCcEsKvK06nug3d3W8Cx8ND9Bvunrssvc25qmAeHsIb6/ZLHm3F7A/5Zny30DxYurpa9R6mBy3tx0Ytf60Baa2xT91CW4VrptuPXDPbJhjXZrQ3FK92U7ubDZKXFrEIuRVKvtJq5FpIUkydCah9xUJEkKqQpwe14KlXDJNT+Hp2c0Nu/wJTZjVTQAoAAA==' | base64 -d | gzip -d > /tmp/chimera_v16_1_patch.py
+          python3 /tmp/chimera_v16_1_patch.py
+          grep -n 'CHIMERA_LIGHTING_V16_1_VIVID_LOCAL_BOUNCE' src/dxvk/shaders/dxvk_present_common.glsl
+
+      - name: Build DXVK x64 and x32
+        working-directory: dxvk
+        run: |
+          export VERSION_NAME="chimera-dxvk-vivid-local-bounce-v16-1"
+          ./package-release.sh "$VERSION_NAME" build --no-package
+
+      - name: Verify and package runtime
+        working-directory: dxvk
+        run: |
+          set -euxo pipefail
+          root="build/dxvk-chimera-dxvk-vivid-local-bounce-v16-1"
+          test -f "$root/x64/d3d11.dll"
+          test -f "$root/x64/dxgi.dll"
+          test -f "$root/x32/d3d11.dll"
+          test -f "$root/x32/dxgi.dll"
+          grep -q 'CHIMERA_LIGHTING_V16_1_VIVID_LOCAL_BOUNCE' src/dxvk/shaders/dxvk_present_common.glsl
+          mkdir -p ../runtime_bundle
+          cp "$root/x64/d3d11.dll" ../runtime_bundle/d3d11_64.dll
+          cp "$root/x64/dxgi.dll"  ../runtime_bundle/dxgi_64.dll
+          cp "$root/x32/d3d11.dll" ../runtime_bundle/d3d11_32.dll
+          cp "$root/x32/dxgi.dll"  ../runtime_bundle/dxgi_32.dll
+          cp LICENSE ../runtime_bundle/DXVK-LICENSE
+          sha256sum ../runtime_bundle/*.dll
+
+      - name: Upload DXVK runtime
+        uses: actions/upload-artifact@v7
+        with:
+          name: chimera-dxvk-vivid-local-bounce-v16-1-runtime
+          path: runtime_bundle
+          compression-level: 0
+          if-no-files-found: error
